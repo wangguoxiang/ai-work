@@ -1,0 +1,43 @@
+{
+  "temp_db": {
+    "host": "192.168.3.206",
+    "port": 31306,
+    "user": "root",
+    "password": "520dbj-mysql666",
+    "db_name": "gps_temp"
+  },
+  "vehicle_db": {
+    "host": "192.168.3.206",
+    "port": 31306,
+    "user": "root",
+    "password": "",
+    "db_name": "vehicle_db"
+  },
+  "bind_log_db": {
+    "host": "192.168.3.187",
+    "port": 3306,
+    "user": "pabb",
+    "password": "pabb",
+    "db_name": "qjcg",
+    "table": "t_bind_log",
+    "sn_table": "t_sn",
+    "timeout": "10s"
+  },
+  "archive_dir": "./archive",
+  "archive_file": "",
+  "output_dir": "./output",
+  "worker_count": 4,
+  "timezone_offset": 8,
+  "wired_types": [
+    "ZJ210W",
+    "ZJ210",
+    "ZJ220",
+    "ZJ220S",
+    "ZJ220R",
+    "ZJ220F(R)",
+    "ZJ220F",
+    "ZJ220F(D)",
+    "IV100",
+    "ZJ210B"
+  ]
+}

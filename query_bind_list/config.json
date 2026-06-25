@@ -1,0 +1,28 @@
+{
+  "mysql": {
+    "host": "192.168.3.187",
+    "port": 3306,
+    "user": "pabb",
+    "password": "pabb",
+    "database": "qjcg",
+    "table": "t_bind_log",
+    "sn_table": "t_sn",
+    "timeout": "10s"
+  },
+  "server": {
+    "addr": ":8080"
+  },
+  "timezone_offset": 8,
+  "wired_types": [
+    "ZJ210W",
+    "ZJ210",
+    "ZJ220",
+    "ZJ220S",
+    "ZJ220R",
+    "ZJ220F(R)",
+    "ZJ220F",
+    "ZJ220F(D)",
+    "IV100",
+    "ZJ210B"
+  ]
+}

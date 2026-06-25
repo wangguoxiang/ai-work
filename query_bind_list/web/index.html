@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta id="apiBase" name="api-base" content="">
+<title>设备绑定查询 · query_bind_list</title>
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --border: #e3e8ef;
+    --primary: #2b6cff;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --green: #16a34a;
+    --red: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  header h1 { font-size: 20px; margin: 0 0 4px; }
+  header p { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 2px rgba(16,24,40,.04);
+  }
+  form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  input[type=text], input[type=date], textarea {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 14px;
+    width: 100%;
+    outline: none;
+    background: #fff;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 84px; line-height: 1.6; }
+  input:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(43,108,255,.12); }
+  .field.vin { flex: 2 1 280px; }
+  .field.date { flex: 1 1 160px; }
+  button {
+    background: var(--primary);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 0 22px;
+    font-size: 14px;
+    cursor: pointer;
+    height: 38px;
+  }
+  button:hover { opacity: .92; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .status { margin: 14px 0 0; font-size: 13px; color: var(--muted); min-height: 18px; }
+  .status.error { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { background: #f8fafc; color: var(--muted); font-weight: 600; }
+  tr:hover td { background: #f9fbff; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; }
+  .tag.on { background: #e8f7ee; color: var(--green); }
+  .tag.off { background: #fef2f2; color: var(--red); }
+  .tag.wireless { background: #fef3c7; color: #b45309; }
+  .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
+  .chk input { width: 15px; height: 15px; cursor: pointer; }
+  .empty { text-align: center; color: var(--muted); padding: 30px; }
+  .grp { margin-top: 16px; }
+  .grp-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .grp-head:first-child { border-top: none; }
+  .vin-tag { background: #eef2ff; color: var(--primary); padding: 3px 10px; border-radius: 6px; font-size: 13px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .toolbar .spacer { flex: 1; }
+  .toolbar select { border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: #fff; outline: none; }
+  .pager { display: flex; align-items: center; gap: 6px; }
+  .pager button { background: #fff; color: var(--text); border: 1px solid var(--border); padding: 0 12px; height: 34px; border-radius: 8px; font-size: 13px; }
+  .pager button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  .pager button:disabled { opacity: .45; cursor: not-allowed; }
+  .pager .cur { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .pager span { font-size: 13px; color: var(--muted); padding: 0 4px; }
+  .btn-ghost { background: #fff; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0 14px; height: 34px; font-size: 13px; cursor: pointer; }
+  .btn-ghost:hover { border-color: var(--primary); color: var(--primary); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 14px; line-height: 1.75; }
+  code { background: #eef1f6; padding: 1px 6px; border-radius: 4px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>设备绑定查询 · <span class="mono">t_bind_log</span></h1>
+    <p>按 VIN 与时间窗口查询处于绑定状态的设备(状态重叠语义,绑定段在内存配对,兼容 MySQL 5.7)</p>
+  </header>
+
+  <div class="card">
+    <form id="f">
+      <div class="field" style="width:100%;">
+        <label for="vin">VIN 车架号(支持批量,每行一个,或用逗号/空格/分号分隔)</label>
+        <textarea id="vin" rows="4" placeholder="GF6ZVRSH57B0XJ210&#10;另一VIN..." required></textarea>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; width:100%;">
+        <div class="field date">
+          <label for="start">开始日期</label>
+          <input type="date" id="start" required>
+        </div>
+        <div class="field date">
+          <label for="end">结束日期</label>
+          <input type="date" id="end" required>
+        </div>
+        <div class="field">
+          <button type="submit" id="btn">查询</button>
+        </div>
+      </div>
+    </form>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="results">
+    <div class="card" style="margin-top:16px;">
+      <div class="empty">请输入查询条件后点击"查询"</div>
+    </div>
+  </div>
+
+  <div class="hint">
+    <strong>说明:</strong> <code>t_bind_log</code> 是操作流水表,无独立 bind/unbind 字段。
+    后端按 <code>(vin, tid)</code> 分组、按 <code>op_time</code> 排序,在内存里把相邻的"绑定(0) → 解绑(2)"配对成一段;
+    若绑定后无解绑,则该段解绑时间为空(至今绑定)。<br>
+    <strong>批量:</strong> 支持一次查询多个 VIN(每行一个,或用逗号/空格/分号分隔),结果按绑定时间排序、客户端分页展示。<br>
+    <strong>合并去重:</strong> 若同一设备未解绑又被重新绑定,只算一次,并取较早的绑定时间为准。<br>
+    <strong>筛选规则(状态重叠):</strong> 绑定开始 ≤ 窗口结束 且(未解绑 或 解绑 ≥ 窗口开始),即只要绑定关系与查询窗口有交集就返回。
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// baseUrl:用于适配 Nginx 子路径反代。优先读 <meta name="api-base"> 的 content;
+// 为空时回落到相对路径 'api/bindlog'(浏览器按当前页面 URL 解析,子路径自动正确)。
+// 例:Nginx 把 /myapp/ 反代到本服务时,页面在 /myapp/ 下,'api/bindlog' 自动解析为 /myapp/api/bindlog。
+//     如需显式前缀,把 meta 的 content 设为如 '/myapp/' 即可。
+function apiUrl(path) {
+  const base = (document.getElementById('apiBase') || {}).content || '';
+  return base.replace(/\/$/, '') + '/' + path.replace(/^\//, '');
+}
+
+let ALL = [];       // 全量结果(拍平)
+let PAGE = 1;       // 当前页(1-based)
+let PAGESIZE = 100; // 每页条数,0 表示全部
+
+(function defaultDates() {
+  const fmt = d => d.toISOString().slice(0, 10);
+  const end = new Date();
+  const start = new Date();
+  start.setFullYear(start.getFullYear() - 1);
+  $('start').value = fmt(start);
+  $('end').value = fmt(end);
+})();
+$('vin').value = 'GF6ZVRSH57B0XJ210';
+
+$('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const raw = $('vin').value.trim();
+  const start = $('start').value;
+  const end = $('end').value;
+  if (!raw || !start || !end) return;
+
+  const btn = $('btn');
+  const status = $('status');
+  btn.disabled = true;
+  status.className = 'status';
+  status.textContent = '查询中…';
+  $('results').innerHTML = '<div class="card" style="margin-top:16px;"><div class="empty">加载中…</div></div>';
+
+  try {
+    const vins = parseVINsLocal(raw);
+    const resp = await fetch(apiUrl('api/bindlog'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vins, start, end })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+    ALL = data.results || [];
+    PAGE = 1;
+    renderResults();
+    status.textContent = `共 ${data.total} 条 · ${vins.length} 个 VIN · 窗口 ${start} ~ ${end}`;
+  } catch (err) {
+    status.className = 'status error';
+    status.textContent = '查询失败: ' + err.message;
+    ALL = [];
+    $('results').innerHTML = '<div class="card" style="margin-top:16px;"><div class="empty">无数据</div></div>';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function parseVINsLocal(raw) {
+  return raw.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i);
+}
+
+function esc(s) {
+  return (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function totalPages() {
+  if (PAGESIZE === 0 || ALL.length === 0) return 1;
+  return Math.ceil(ALL.length / PAGESIZE);
+}
+
+function pageSlice() {
+  if (PAGESIZE === 0) return ALL;
+  const a = (PAGE - 1) * PAGESIZE;
+  return ALL.slice(a, a + PAGESIZE);
+}
+
+function rowHTML(r, seq) {
+  const unbindCell = r.unbind_time
+    ? esc(r.unbind_time)
+    : '<span style="color:#9ca3af">— 至今未解绑</span>';
+  const tag = r.unbind_time
+    ? '<span class="tag off">已解绑</span>'
+    : '<span class="tag on">绑定中</span>';
+  const typeCell = r.is_wired
+    ? `<span class="tag on">${esc(r.sn_type)}</span>`
+    : (r.sn_type ? `<span class="tag wireless">${esc(r.sn_type)}</span>` : '<span style="color:#9ca3af">-</span>');
+  return `<tr>
+    <td>${seq}</td>
+    <td class="mono">${esc(r.vin)}</td>
+    <td class="mono">${esc(r.tid)}</td>
+    <td class="mono">${esc(r.sn) || '-'}</td>
+    <td>${typeCell}</td>
+    <td>${esc(r.cnum) || '-'}</td>
+    <td>${esc(r.bind_time) || '-'}</td>
+    <td>${unbindCell}</td>
+    <td>${tag}</td>
+  </tr>`;
+}
+
+function pagerHTML() {
+  if (ALL.length === 0) return '';
+  const tp = totalPages();
+  const cur = Math.min(PAGE, tp);
+  return `<div class="pager">
+    <button onclick="goPage(1)" ${cur <= 1 ? 'disabled' : ''}>首页</button>
+    <button onclick="goPage(${cur - 1})" ${cur <= 1 ? 'disabled' : ''}>上一页</button>
+    <span>第 ${cur} / ${tp} 页 · 共 ${ALL.length} 条</span>
+    <button onclick="goPage(${cur + 1})" ${cur >= tp ? 'disabled' : ''}>下一页</button>
+    <button onclick="goPage(${tp})" ${cur >= tp ? 'disabled' : ''}>末页</button>
+    <span style="margin-left:8px;">每页</span>
+    <select onchange="changeSize(this.value)">
+      <option value="100" ${PAGESIZE === 100 ? 'selected' : ''}>100</option>
+      <option value="500" ${PAGESIZE === 500 ? 'selected' : ''}>500</option>
+      <option value="0" ${PAGESIZE === 0 ? 'selected' : ''}>全部</option>
+    </select>
+  </div>`;
+}
+
+function renderResults() {
+  const c = $('results');
+  if (ALL.length === 0) {
+    c.innerHTML = '<div class="card" style="margin-top:16px;"><div class="empty">该时间窗口内没有处于绑定状态的设备</div></div>';
+    return;
+  }
+  const rows = pageSlice();
+  const offset = PAGESIZE === 0 ? 0 : (PAGE - 1) * PAGESIZE;
+  const body = rows.map((r, i) => rowHTML(r, offset + i + 1)).join('');
+  const exportBtn = `<button class="btn-ghost" onclick="exportCSV()">导出 CSV</button>`;
+  const wiredChk = `<label class="chk"><input type="checkbox" id="wiredOnly"> 仅导出有线设备</label>`;
+  c.innerHTML = `<section class="card" style="margin-top:16px; padding:0; overflow:hidden;">
+    <div class="toolbar">
+      ${pagerHTML()}
+      <div class="spacer"></div>
+      ${wiredChk}
+      ${exportBtn}
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>vin</th><th>tid</th><th>sn</th><th>设备类型</th><th>cnum</th>
+            <th>绑定时间</th><th>解绑时间</th><th>状态</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+window.goPage = function (p) {
+  const tp = totalPages();
+  PAGE = Math.max(1, Math.min(p, tp));
+  renderResults();
+};
+
+window.changeSize = function (v) {
+  PAGESIZE = parseInt(v, 10) || 0;
+  PAGE = 1;
+  renderResults();
+};
+
+function csvCell(v) {
+  if (v == null) v = '';
+  v = String(v);
+  if (/[",\r\n]/.test(v)) return '"' + v.replace(/"/g, '""') + '"';
+  return v;
+}
+
+window.exportCSV = function () {
+  if (ALL.length === 0) return;
+  const wiredOnly = $('wiredOnly') && $('wiredOnly').checked;
+  const src = wiredOnly ? ALL.filter(r => r.is_wired) : ALL;
+  if (src.length === 0) {
+    alert('当前结果中没有有线设备,无法导出');
+    return;
+  }
+  const cols = ['tid', 'sn', 'bind_ts', 'unbind_ts'];
+  const header = 'tid,sn,bind_time,unbind_time';
+  const lines = src.map(r => {
+    const cells = cols.map(c => csvCell(r[c]));
+    if (!r.unbind_ts) cells[3] = '';
+    return cells.join(',');
+  });
+  const csv = '\ufeff' + [header].concat(lines).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const tag = wiredOnly ? '_wired' : '';
+  a.download = `bind_log${tag}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+};
+</script>
+</body>
+</html>
