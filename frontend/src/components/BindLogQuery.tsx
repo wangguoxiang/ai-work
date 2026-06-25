@@ -108,8 +108,7 @@ const BindLogQuery: React.FC = () => {
       return;
     }
 
-    const cols: (keyof BindSegment)[] = ['tid', 'sn', 'bind_ts', 'unbind_ts'];
-    const header = 'tid,sn,bind_time,unbind_time';
+    const header = 'tid,sn,vin,bind_time,unbind_time';
     const csvCell = (v: any): string => {
       if (v == null) v = '';
       v = String(v);
@@ -117,8 +116,13 @@ const BindLogQuery: React.FC = () => {
       return v;
     };
     const lines = src.map((r) => {
-      const cells = cols.map((c) => csvCell(r[c]));
-      if (!r.unbind_ts) cells[3] = '';
+      const cells = [
+        csvCell(r.tid),
+        csvCell(r.sn),
+        csvCell(r.vin),
+        csvCell(r.bind_time),
+        r.unbind_time ? csvCell(r.unbind_time) : '',
+      ];
       return cells.join(',');
     });
     const csv = '\ufeff' + [header].concat(lines).join('\r\n');

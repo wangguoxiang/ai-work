@@ -4,18 +4,18 @@ import "fmt"
 
 // VehicleInfo 车辆信息查询请求
 type VehicleInfo struct {
-	VIN      string `json:"vin" form:"vin"`
-	PlateNo  string `json:"plate_no" form:"plate_no"`
+	VIN     string `json:"vin" form:"vin"`
+	PlateNo string `json:"plate_no" form:"plate_no"`
 }
 
 // VehicleQueryResult 车辆查询结果
 type VehicleQueryResult struct {
-	VIN        string          `json:"vin"`
-	PlateNo    string          `json:"plate_no"`
-	TID        string          `json:"tid"`
-	Found      bool            `json:"found"`
-	BindHistory []BindRecord   `json:"bind_history"`
-	Error      string          `json:"error,omitempty"`
+	VIN         string       `json:"vin"`
+	PlateNo     string       `json:"plate_no"`
+	TID         string       `json:"tid"`
+	Found       bool         `json:"found"`
+	BindHistory []BindRecord `json:"bind_history"`
+	Error       string       `json:"error,omitempty"`
 }
 
 // BindRecord TID设备与车辆绑定记录
@@ -35,45 +35,58 @@ type BatchVehicleQueryRequest struct {
 
 // FilterTaskRequest 过滤任务请求
 type FilterTaskRequest struct {
-	TIDs          []string `json:"tids" binding:"required"`
-	StartTime     string   `json:"start_time" binding:"required"`
-	EndTime       string   `json:"end_time" binding:"required"`
-	ArchiveDir    string   `json:"archive_dir" binding:"required"`
-	ArchiveFile   string   `json:"archive_file"`
-	OutputDir     string   `json:"output_dir" binding:"required"`
-	WorkerCount   int      `json:"worker_count"`
+	TIDs        []string `json:"tids" binding:"required"`
+	StartTime   string   `json:"start_time" binding:"required"`
+	EndTime     string   `json:"end_time" binding:"required"`
+	ArchiveDir  string   `json:"archive_dir"`
+	ArchiveFile string   `json:"archive_file"`
+	OutputDir   string   `json:"output_dir"`
+	WorkerCount int      `json:"worker_count"`
+	COSFiles    []string `json:"cos_files"`     // COS中选择的文件
+	TIDFilePath string   `json:"tid_file_path"` // TID列表文件路径
 }
 
 // TaskStatus 任务状态
 type TaskStatus struct {
-	TaskID        string   `json:"task_id"`
-	Status        string   `json:"status"` // running, completed, failed
-	Progress      float64  `json:"progress"`
-	TotalFiles    int      `json:"total_files"`
-	ProcessedFiles int     `json:"processed_files"`
-	TotalRecords  int64    `json:"total_records"`
-	FilteredRecords int64  `json:"filtered_records"`
-	ExportedRecords int64  `json:"exported_records"`
-	CurrentFile   string   `json:"current_file"`
-	TIDs          []string `json:"tids"`
-	StartTime     string   `json:"start_time"`
-	EndTime       string   `json:"end_time"`
-	Error         string   `json:"error,omitempty"`
-	StartAt       string   `json:"start_at"`
-	Elapsed       string   `json:"elapsed"`
+	TaskID          string   `json:"task_id"`
+	Status          string   `json:"status"` // pending, downloading, filtering, importing, completed, failed
+	Progress        float64  `json:"progress"`
+	Stage           string   `json:"stage"` // 当前阶段描述
+	TotalFiles      int      `json:"total_files"`
+	ProcessedFiles  int      `json:"processed_files"`
+	TotalRecords    int64    `json:"total_records"`
+	FilteredRecords int64    `json:"filtered_records"`
+	ExportedRecords int64    `json:"exported_records"`
+	CurrentFile     string   `json:"current_file"`
+	TIDs            []string `json:"tids"`
+	COSFiles        []string `json:"cos_files"`
+	StartTime       string   `json:"start_time"`
+	EndTime         string   `json:"end_time"`
+	Error           string   `json:"error,omitempty"`
+	StartAt         string   `json:"start_at"`
+	Elapsed         string   `json:"elapsed"`
+	Logs            []string `json:"logs"` // 详细步骤日志
+}
+
+// COSConfig 腾讯云COS存储桶配置
+type COSConfig struct {
+	SecretID  string `json:"secret_id"`
+	SecretKey string `json:"secret_key"`
+	Bucket    string `json:"bucket"`
+	Region    string `json:"region"`
+	BaseDir   string `json:"base_dir"`
 }
 
 // AppConfig 应用配置
 type AppConfig struct {
-	TempDB        DBConfig      `json:"temp_db"`
-	VehicleDB     DBConfig      `json:"vehicle_db"`
-	BindLogDB     BindLogConfig `json:"bind_log_db"`
-	ArchiveDir    string        `json:"archive_dir"`
-	OutputDir     string        `json:"output_dir"`
-	WorkerCount   int           `json:"worker_count"`
-	ArchiveFile   string        `json:"archive_file"`
-	WiredTypes    []string      `json:"wired_types"`
-	TimezoneOffset int          `json:"timezone_offset"`
+	TempDB         DBConfig      `json:"temp_db"`
+	VehicleDB      DBConfig      `json:"vehicle_db"`
+	BindLogDB      BindLogConfig `json:"bind_log_db"`
+	COSConfig      COSConfig     `json:"cos_config"`
+	WorkDir        string        `json:"work_dir"`
+	WorkerCount    int           `json:"worker_count"`
+	WiredTypes     []string      `json:"wired_types"`
+	TimezoneOffset int           `json:"timezone_offset"`
 }
 
 // DBConfig 数据库配置
@@ -128,8 +141,14 @@ func DefaultConfig() AppConfig {
 			SNTable:  "t_sn",
 			Timeout:  "10s",
 		},
-		ArchiveDir:     "./archive",
-		OutputDir:      "./output",
+		COSConfig: COSConfig{
+			SecretID:  "",
+			SecretKey: "",
+			Bucket:    "",
+			Region:    "",
+			BaseDir:   "",
+		},
+		WorkDir:        "./work",
 		WorkerCount:    4,
 		TimezoneOffset: 8,
 		WiredTypes: []string{
@@ -143,14 +162,14 @@ func DefaultConfig() AppConfig {
 
 // BindLogConfig t_bind_log 数据库/表配置
 type BindLogConfig struct {
-	Host     string   `json:"host"`
-	Port     int      `json:"port"`
-	User     string   `json:"user"`
-	Password string   `json:"password"`
-	DBName   string   `json:"db_name"`
-	Table    string   `json:"table"`
-	SNTable  string   `json:"sn_table"`
-	Timeout  string   `json:"timeout"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	DBName   string `json:"db_name"`
+	Table    string `json:"table"`
+	SNTable  string `json:"sn_table"`
+	Timeout  string `json:"timeout"`
 }
 
 // BindLogRequest 绑定日志查询请求

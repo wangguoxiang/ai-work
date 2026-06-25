@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	appConfig models.AppConfig
-	configMu  sync.RWMutex
+	appConfig  models.AppConfig
+	configMu   sync.RWMutex
 	configPath string
 )
 
@@ -51,6 +51,9 @@ func Update(cfg models.AppConfig) error {
 	if cfg.VehicleDB.Password == "" && appConfig.VehicleDB.Password != "" {
 		cfg.VehicleDB.Password = appConfig.VehicleDB.Password
 	}
+	if cfg.COSConfig.SecretKey == "" && appConfig.COSConfig.SecretKey != "" {
+		cfg.COSConfig.SecretKey = appConfig.COSConfig.SecretKey
+	}
 
 	appConfig = cfg
 	return saveConfig()
@@ -90,17 +93,30 @@ func UpdatePartial(updates map[string]interface{}) error {
 	if v, ok := updates["timezone_offset"]; ok {
 		cfg.TimezoneOffset = toInt(v)
 	}
-	if v, ok := updates["archive_dir"]; ok {
-		cfg.ArchiveDir = toString(v)
-	}
-	if v, ok := updates["archive_file"]; ok {
-		cfg.ArchiveFile = toString(v)
-	}
-	if v, ok := updates["output_dir"]; ok {
-		cfg.OutputDir = toString(v)
+	if v, ok := updates["work_dir"]; ok {
+		cfg.WorkDir = toString(v)
 	}
 	if v, ok := updates["worker_count"]; ok {
 		cfg.WorkerCount = toInt(v)
+	}
+	if v, ok := updates["cos_config"]; ok {
+		if m, ok := v.(map[string]interface{}); ok {
+			if vv, ok := m["secret_id"]; ok {
+				cfg.COSConfig.SecretID = toString(vv)
+			}
+			if vv, ok := m["secret_key"]; ok {
+				cfg.COSConfig.SecretKey = toString(vv)
+			}
+			if vv, ok := m["bucket"]; ok {
+				cfg.COSConfig.Bucket = toString(vv)
+			}
+			if vv, ok := m["region"]; ok {
+				cfg.COSConfig.Region = toString(vv)
+			}
+			if vv, ok := m["base_dir"]; ok {
+				cfg.COSConfig.BaseDir = toString(vv)
+			}
+		}
 	}
 
 	appConfig = cfg

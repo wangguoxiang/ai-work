@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,15 +23,17 @@ type Handler struct {
 	archiveService *services.ArchiveService
 	taskManager    *services.TaskManager
 	bindLogService *services.BindLogService
+	cosService     *services.COSService
 }
 
 // NewHandler 创建处理器
-func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *services.TaskManager, bls *services.BindLogService) *Handler {
+func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *services.TaskManager, bls *services.BindLogService, cs *services.COSService) *Handler {
 	return &Handler{
 		vehicleService: vs,
 		archiveService: as,
 		taskManager:    tm,
 		bindLogService: bls,
+		cosService:     cs,
 	}
 }
 
@@ -174,22 +177,17 @@ func (h *Handler) StartFilter(c *gin.Context) {
 	// 使用配置中的默认值
 	cfg := config.Get()
 	if req.ArchiveDir == "" {
-		req.ArchiveDir = cfg.ArchiveDir
+		req.ArchiveDir = cfg.WorkDir
 	}
 	if req.OutputDir == "" {
-		req.OutputDir = cfg.OutputDir
+		req.OutputDir = cfg.WorkDir
 	}
 	if req.WorkerCount <= 0 {
 		req.WorkerCount = cfg.WorkerCount
 	}
 
-	// 检查目录是否存在
-	if _, err := os.Stat(req.ArchiveDir); os.IsNotExist(err) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "归档目录不存在: " + req.ArchiveDir})
-		return
-	}
-
-	// 确保输出目录存在
+	// 确保目录存在
+	os.MkdirAll(req.ArchiveDir, 0755)
 	os.MkdirAll(req.OutputDir, 0755)
 
 	filterReq := services.FilterRequest{
@@ -246,12 +244,13 @@ func (h *Handler) DeleteTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "任务已删除"})
 }
 
-// ListArchiveFiles 列出归档目录中的文件
+// ListArchiveFiles 列出工作目录中的下载文件
 func (h *Handler) ListArchiveFiles(c *gin.Context) {
 	cfg := config.Get()
+	downloadDir := filepath.Join(cfg.WorkDir, "downloads")
 
 	var files []models.ArchiveFileInfo
-	err := filepath.Walk(cfg.ArchiveDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(downloadDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -269,12 +268,12 @@ func (h *Handler) ListArchiveFiles(c *gin.Context) {
 	})
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取归档目录失败: " + err.Error()})
-		return
+		// 目录可能还不存在，返回空列表
+		files = []models.ArchiveFileInfo{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"dir":   cfg.ArchiveDir,
+		"dir":   downloadDir,
 		"total": len(files),
 		"files": files,
 	})
@@ -308,66 +307,202 @@ func (h *Handler) QueryBindLog(c *gin.Context) {
 	})
 }
 
-// QueryTIDsByTimeRange 根据时间范围查询TID列表（含车架号和车牌号）
-func (h *Handler) QueryTIDsByTimeRange(c *gin.Context) {
-	var req struct {
-		Start string `json:"start" binding:"required"`
-		End   string `json:"end" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数 start / end 不能为空"})
-		return
-	}
-
-	// 从绑定流水查询时间范围内的TID和VIN
-	tidVins, err := h.bindLogService.QueryTIDsByTimeRange(req.Start, req.End)
+// ImportCSV 导入绑定流水CSV文件，返回TID列表（含车架号和车牌号）
+func (h *Handler) ImportCSV(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询TID列表失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV文件: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	if header == nil || (!strings.HasSuffix(strings.ToLower(header.Filename), ".csv") && header.Header.Get("Content-Type") != "text/csv") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV格式文件"})
 		return
 	}
 
-	if len(tidVins) == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"total": 0,
-			"tids":  []services.TIDWithVIN{},
-		})
+	// 读取CSV
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV文件解析失败: " + err.Error()})
 		return
 	}
 
-	// 收集所有VIN，批量查询车牌号
-	vins := make([]string, 0, len(tidVins))
-	for _, tv := range tidVins {
-		if tv.VIN != "" {
-			vins = append(vins, tv.VIN)
+	if len(records) < 2 {
+		c.JSON(http.StatusOK, gin.H{"total": 0, "tids": []interface{}{}})
+		return
+	}
+
+	// 解析表头，查找列索引（去除可能的 BOM 和空白）
+	headerRow := records[0]
+	colMap := make(map[string]int)
+	for i, col := range headerRow {
+		clean := strings.TrimSpace(strings.ToLower(col))
+		clean = strings.TrimLeft(clean, "\ufeff\u00a0")
+		colMap[clean] = i
+	}
+
+	tidIdx, hasTID := colMap["tid"]
+	vinIdx, hasVIN := colMap["vin"]
+
+	if !hasTID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV文件中未找到 tid 列"})
+		return
+	}
+
+	// 收集所有TID和VIN（不过滤时间，直接导入全部）
+	type tidItem struct {
+		TID string `json:"tid"`
+		VIN string `json:"vin"`
+	}
+	seen := make(map[string]bool)
+	var matched []tidItem
+	vinsForLookup := []string{}
+
+	for _, row := range records[1:] {
+		if tidIdx >= len(row) {
+			continue
+		}
+		tid := strings.TrimSpace(row[tidIdx])
+		if tid == "" {
+			continue
+		}
+		vin := ""
+		if hasVIN && vinIdx < len(row) {
+			vin = strings.TrimSpace(row[vinIdx])
+		}
+		key := tid + "|" + vin
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		matched = append(matched, tidItem{TID: tid, VIN: vin})
+		if vin != "" {
+			vinsForLookup = append(vinsForLookup, vin)
 		}
 	}
 
+	// 批量查询车牌号
 	plateMap := make(map[string]string)
-	if len(vins) > 0 {
-		pm, err := h.vehicleService.BatchQueryPlateNoByVINs(vins)
+	if len(vinsForLookup) > 0 {
+		pm, err := h.vehicleService.BatchQueryPlateNoByVINs(vinsForLookup)
 		if err == nil {
 			plateMap = pm
 		}
 	}
 
 	// 组装结果
-	type TIDItem struct {
+	type resultItem struct {
 		TID     string `json:"tid"`
 		VIN     string `json:"vin"`
 		PlateNo string `json:"plate_no"`
 	}
-	items := make([]TIDItem, 0, len(tidVins))
-	for _, tv := range tidVins {
-		items = append(items, TIDItem{
-			TID:     tv.TID,
-			VIN:     tv.VIN,
-			PlateNo: plateMap[tv.VIN],
+	items := make([]resultItem, 0, len(matched))
+	for _, m := range matched {
+		items = append(items, resultItem{
+			TID:     m.TID,
+			VIN:     m.VIN,
+			PlateNo: plateMap[m.VIN],
 		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"total": len(items),
 		"tids":  items,
+	})
+}
+
+// ListCOSFiles 列出COS存储桶中的文件
+func (h *Handler) ListCOSFiles(c *gin.Context) {
+	prefix := c.Query("prefix")
+	files, err := h.cosService.ListFiles(prefix)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "列出COS文件失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total": len(files),
+		"files": files,
+	})
+}
+
+// CreateCOSFilterTask 创建COS过滤任务（含CSV导入的TID）
+func (h *Handler) CreateCOSFilterTask(c *gin.Context) {
+	var req struct {
+		TIDs      []string `json:"tids" binding:"required"`
+		VINs      []string `json:"vins"`
+		PlateNos  []string `json:"plate_nos"`
+		StartTime string   `json:"start_time" binding:"required"`
+		EndTime   string   `json:"end_time" binding:"required"`
+		COSFiles  []string `json:"cos_files" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+
+	if len(req.TIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少提供一个TID"})
+		return
+	}
+	if len(req.COSFiles) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少选择一个COS文件"})
+		return
+	}
+
+	cfg := config.Get()
+	workDir := cfg.WorkDir
+
+	// 保存TID列表到文件
+	tidWithPlates := make([]services.TIDWithPlate, len(req.TIDs))
+	for i, tid := range req.TIDs {
+		vin := ""
+		plateNo := ""
+		if i < len(req.VINs) {
+			vin = req.VINs[i]
+		}
+		if i < len(req.PlateNos) {
+			plateNo = req.PlateNos[i]
+		}
+		tidWithPlates[i] = services.TIDWithPlate{
+			TID:     tid,
+			VIN:     vin,
+			PlateNo: plateNo,
+		}
+	}
+	tidFilePath, err := services.SaveTIDFile(workDir, tidWithPlates)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存TID文件失败: " + err.Error()})
+		return
+	}
+
+	// 创建任务
+	taskReq := models.FilterTaskRequest{
+		TIDs:        req.TIDs,
+		StartTime:   req.StartTime,
+		EndTime:     req.EndTime,
+		COSFiles:    req.COSFiles,
+		TIDFilePath: tidFilePath,
+		WorkerCount: cfg.WorkerCount,
+	}
+	taskID := h.taskManager.CreateTask(taskReq)
+
+	// 异步启动COS管道任务
+	pipelineReq := services.COSPipelineRequest{
+		TIDs:        req.TIDs,
+		StartTime:   req.StartTime,
+		EndTime:     req.EndTime,
+		COSFiles:    req.COSFiles,
+		WorkDir:     workDir,
+		WorkerCount: cfg.WorkerCount,
+		COSService:  h.cosService,
+	}
+	go h.archiveService.StartCOSPipeline(context.Background(), taskID, pipelineReq)
+
+	c.JSON(http.StatusOK, gin.H{
+		"task_id": taskID,
+		"message": "任务已创建",
 	})
 }
 
@@ -379,8 +514,7 @@ func (h *Handler) Health(c *gin.Context) {
 		"time":    time.Now().Format("2006-01-02 15:04:05"),
 		"version": "1.0.0",
 		"config": map[string]interface{}{
-			"archive_dir":  cfg.ArchiveDir,
-			"output_dir":   cfg.OutputDir,
+			"work_dir":     cfg.WorkDir,
 			"worker_count": cfg.WorkerCount,
 		},
 	})

@@ -17,17 +17,21 @@
     "host": "192.168.3.187",
     "port": 3306,
     "user": "pabb",
-    "password": "pabb",
+    "password": "",
     "db_name": "qjcg",
     "table": "t_bind_log",
     "sn_table": "t_sn",
     "timeout": "10s"
   },
-  "archive_dir": "./archive",
-  "archive_file": "",
-  "output_dir": "./output",
+  "cos_config": {
+    "secret_id": "",
+    "secret_key": "",
+    "bucket": "",
+    "region": "",
+    "base_dir": ""
+  },
+  "work_dir": "./work",
   "worker_count": 4,
-  "timezone_offset": 8,
   "wired_types": [
     "ZJ210W",
     "ZJ210",
@@ -39,5 +43,6 @@
     "ZJ220F(D)",
     "IV100",
     "ZJ210B"
-  ]
+  ],
+  "timezone_offset": 8
 }

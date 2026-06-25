@@ -12,8 +12,8 @@ import (
 
 // TaskManager 任务管理器
 type TaskManager struct {
-	mu     sync.RWMutex
-	tasks  map[string]*models.TaskStatus
+	mu    sync.RWMutex
+	tasks map[string]*models.TaskStatus
 }
 
 // NewTaskManager 创建任务管理器
@@ -32,13 +32,13 @@ func (tm *TaskManager) CreateTask(req models.FilterTaskRequest) string {
 	startAt := time.Now()
 
 	task := &models.TaskStatus{
-		TaskID:         taskID,
-		Status:         "pending",
-		Progress:       0,
-		TIDs:           req.TIDs,
-		StartTime:      req.StartTime,
-		EndTime:        req.EndTime,
-		StartAt:        startAt.Format("2006-01-02 15:04:05"),
+		TaskID:    taskID,
+		Status:    "pending",
+		Progress:  0,
+		TIDs:      req.TIDs,
+		StartTime: req.StartTime,
+		EndTime:   req.EndTime,
+		StartAt:   startAt.Format("2006-01-02 15:04:05"),
 	}
 
 	tm.tasks[taskID] = task
@@ -86,6 +86,20 @@ func (tm *TaskManager) ListTasks() []*models.TaskStatus {
 		tasks = append(tasks, t)
 	}
 	return tasks
+}
+
+// AddLog 向任务添加日志
+func (tm *TaskManager) AddLog(taskID, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	ts := time.Now().Format("15:04:05")
+	entry := fmt.Sprintf("[%s] %s", ts, msg)
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if task, ok := tm.tasks[taskID]; ok {
+		task.Logs = append(task.Logs, entry)
+	}
 }
 
 // DeleteTask 删除任务

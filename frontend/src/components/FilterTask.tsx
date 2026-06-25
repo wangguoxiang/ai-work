@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Card,
   Form,
@@ -14,31 +14,36 @@ import {
   Typography,
   Row,
   Col,
-  Divider,
-  Tooltip,
+  Checkbox,
+  Progress,
 } from 'antd';
 import {
   PlayCircleOutlined,
-  PlusOutlined,
   DeleteOutlined,
-  FolderOpenOutlined,
-  CopyOutlined,
   ClockCircleOutlined,
   ImportOutlined,
+  CloudDownloadOutlined,
+  ReloadOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  LoadingOutlined,
+  FileOutlined,
+  CopyOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
-  startFilterTask,
-  listArchiveFiles,
   getConfig,
-  queryTIDHistory,
-  queryTIDsByTimeRange,
-  ArchiveFileInfo,
+  importCSV,
+  listCOSFiles,
+  createCOSFilterTask,
+  listTasks,
+  deleteTask,
   TIDImportItem,
+  COSFileInfo,
+  TaskStatus as TaskStatusType,
 } from '../api';
 
-const { TextArea } = Input;
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const { RangePicker } = DatePicker;
 
 interface TIDEntry {
@@ -48,434 +53,268 @@ interface TIDEntry {
 }
 
 const FilterTask: React.FC = () => {
-  const [tidEntries, setTidEntries] = useState<TIDEntry[]>([{ tid: '', vin: '', plate_no: '' }]);
-  const [timeRange, setTimeRange] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null]>([null, null]);
-  const [archiveDir, setArchiveDir] = useState('./archive');
-  const [archiveFile, setArchiveFile] = useState('');
-  const [outputDir, setOutputDir] = useState('./output');
-  const [workerCount, setWorkerCount] = useState(4);
-  const [loading, setLoading] = useState(false);
+  // TID列表
+  const [tidEntries, setTidEntries] = useState<TIDEntry[]>([]);
   const [importLoading, setImportLoading] = useState(false);
-  const [archiveFiles, setArchiveFiles] = useState<ArchiveFileInfo[]>([]);
-  const [showFiles, setShowFiles] = useState(false);
+  const [importFileName, setImportFileName] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 时间范围
+  const [timeRange, setTimeRange] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null]>([null, null]);
+
+  // COS文件
+  const [cosFiles, setCosFiles] = useState<COSFileInfo[]>([]);
+  const [selectedCOSFiles, setSelectedCOSFiles] = useState<Set<string>>(new Set());
+  const [cosLoading, setCosLoading] = useState(false);
+
+  // 任务
+  const [taskLoading, setTaskLoading] = useState(false);
+  const [tasks, setTasks] = useState<TaskStatusType[]>([]);
+  const [workerCount, setWorkerCount] = useState(4);
 
   // 加载配置
   useEffect(() => {
-    loadConfig();
+    getConfig().then(r => setWorkerCount(r.data.worker_count)).catch(() => {});
+    loadTasks();
+    loadCOSFiles();
   }, []);
 
-  const loadConfig = async () => {
+  // 定时刷新运行中的任务
+  useEffect(() => {
+    const hasRunning = tasks.some(t => t.status === 'running' || t.status === 'pending');
+    if (!hasRunning) return;
+    const timer = setInterval(loadTasks, 3000);
+    return () => clearInterval(timer);
+  }, [tasks]);
+
+  const loadTasks = async () => {
     try {
-      const resp = await getConfig();
-      const cfg = resp.data;
-      setArchiveDir(cfg.archive_dir);
-      setOutputDir(cfg.output_dir);
-      setWorkerCount(cfg.worker_count);
-      if (cfg.archive_file) {
-        setArchiveFile(cfg.archive_file);
-      }
-    } catch (err) {
-      // 使用默认值
-    }
+      const resp = await listTasks();
+      setTasks(resp.data.tasks);
+    } catch (_) {}
   };
 
-  // 加载归档文件列表
-  const loadArchiveFiles = async () => {
+  const loadCOSFiles = async () => {
+    setCosLoading(true);
     try {
-      const resp = await listArchiveFiles();
-      setArchiveFiles(resp.data.files);
-      setShowFiles(true);
+      const resp = await listCOSFiles();
+      setCosFiles(resp.data.files);
     } catch (err: any) {
-      message.error('加载归档文件列表失败: ' + (err.response?.data?.error || err.message));
+      message.error('加载COS文件失败: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setCosLoading(false);
     }
   };
 
-  // 添加TID
-  const addTID = () => {
-    setTidEntries([...tidEntries, { tid: '', vin: '', plate_no: '' }]);
+  // CSV导入TID（直接导入，不过滤时间）
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
   };
 
-  // 删除TID
-  const removeTID = (index: number) => {
-    if (tidEntries.length <= 1) return;
-    setTidEntries(tidEntries.filter((_, i) => i !== index));
-  };
-
-  // 更新TID
-  const updateTID = (index: number, value: string) => {
-    const newEntries = [...tidEntries];
-    newEntries[index] = { ...newEntries[index], tid: value };
-    setTidEntries(newEntries);
-  };
-
-  // 更新VIN
-  const updateVIN = (index: number, value: string) => {
-    const newEntries = [...tidEntries];
-    newEntries[index] = { ...newEntries[index], vin: value };
-    setTidEntries(newEntries);
-  };
-
-  // 更新车牌号
-  const updatePlateNo = (index: number, value: string) => {
-    const newEntries = [...tidEntries];
-    newEntries[index] = { ...newEntries[index], plate_no: value };
-    setTidEntries(newEntries);
-  };
-
-  // 批量粘贴TID
-  const handleBatchPasteTID = () => {
-    const input = prompt('请输入TID列表（多个TID用逗号、空格或换行分隔）：');
-    if (input) {
-      const parsed = input.split(/[\n,，\s]+/).filter(t => t.trim());
-      if (parsed.length > 0) {
-        setTidEntries(parsed.map(t => ({ tid: t, vin: '', plate_no: '' })));
-        message.success(`已导入 ${parsed.length} 个TID`);
-      } else {
-        message.warning('未识别到有效TID');
-      }
-    }
-  };
-
-  // 从绑定流水导入TID
-  const handleImportFromBindLog = async () => {
-    if (!timeRange[0] || !timeRange[1]) {
-      message.warning('请先选择时间范围');
-      return;
-    }
-
-    const start = timeRange[0].format('YYYY-MM-DD');
-    const end = timeRange[1].format('YYYY-MM-DD');
-
+  const handleCSVFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
     setImportLoading(true);
+    setImportFileName(file.name);
     try {
-      const resp = await queryTIDsByTimeRange(start, end);
-      const items: TIDEntry[] = resp.data.tids.map((item: TIDImportItem) => ({
-        tid: item.tid,
-        vin: item.vin,
-        plate_no: item.plate_no,
+      const resp = await importCSV(file);
+      const items = resp.data.tids.map((item: TIDImportItem) => ({
+        tid: item.tid, vin: item.vin, plate_no: item.plate_no,
       }));
-
       if (items.length === 0) {
-        message.info('该时间范围内没有找到绑定的TID设备');
-        setTidEntries([{ tid: '', vin: '', plate_no: '' }]);
+        message.info('CSV文件中没有TID数据');
+        setTidEntries([]);
       } else {
         setTidEntries(items);
-        message.success(`已从绑定流水导入 ${items.length} 个TID设备`);
+        message.success(`已导入 ${items.length} 个TID`);
       }
     } catch (err: any) {
       message.error('导入失败: ' + (err.response?.data?.error || err.message));
     } finally {
       setImportLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  // 启动过滤任务
-  const handleStartFilter = async () => {
-    const validTIDs = tidEntries.map(e => e.tid.trim()).filter(t => t);
-    if (validTIDs.length === 0) {
-      message.warning('请至少输入一个TID');
-      return;
-    }
+  const removeTID = (idx: number) => {
+    if (tidEntries.length <= 1) return;
+    setTidEntries(tidEntries.filter((_, i) => i !== idx));
+  };
 
-    if (!timeRange[0] || !timeRange[1]) {
-      message.warning('请选择开始和结束时间');
-      return;
-    }
+  const toggleCOSFile = (key: string) => {
+    const s = new Set(selectedCOSFiles);
+    s.has(key) ? s.delete(key) : s.add(key);
+    setSelectedCOSFiles(s);
+  };
 
-    const startTime = timeRange[0].format('YYYY-MM-DD 00:00:00');
-    const endTime = timeRange[1].format('YYYY-MM-DD 23:59:59');
+  const handleCreateTask = async () => {
+    const validTIDs = tidEntries.map(e => e.tid.trim()).filter(Boolean);
+    if (validTIDs.length === 0) { message.warning('请先导入TID'); return; }
+    if (!timeRange[0] || !timeRange[1]) { message.warning('请选择时间范围'); return; }
+    if (selectedCOSFiles.size === 0) { message.warning('请选择COS文件'); return; }
 
-    setLoading(true);
-
+    setTaskLoading(true);
     try {
-      const resp = await startFilterTask({
+      await createCOSFilterTask({
         tids: validTIDs,
-        start_time: startTime,
-        end_time: endTime,
-        archive_dir: archiveDir,
-        archive_file: archiveFile,
-        output_dir: outputDir,
-        worker_count: workerCount,
+        vins: tidEntries.map(e => e.vin),
+        plate_nos: tidEntries.map(e => e.plate_no),
+        start_time: timeRange[0].format('YYYY-MM-DD 00:00:00'),
+        end_time: timeRange[1].format('YYYY-MM-DD 23:59:59'),
+        cos_files: Array.from(selectedCOSFiles),
       });
-
-      message.success(`过滤任务已启动！任务ID: ${resp.data.task_id}`);
+      message.success('任务已创建');
+      loadTasks();
     } catch (err: any) {
-      message.error('启动任务失败: ' + (err.response?.data?.error || err.message));
+      message.error('创建任务失败: ' + (err.response?.data?.error || err.message));
     } finally {
-      setLoading(false);
+      setTaskLoading(false);
     }
   };
 
-  // 文件列表表格列
-  const fileColumns = [
-    {
-      title: '文件名',
-      dataIndex: 'file_name',
-      key: 'file_name',
-    },
-    {
-      title: '文件大小',
-      dataIndex: 'file_size',
-      key: 'file_size',
-      render: (size: number) => {
-        if (size < 1024) return `${size} B`;
-        if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-        return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-      },
-    },
-    {
-      title: '路径',
-      dataIndex: 'file_path',
-      key: 'file_path',
-      ellipsis: true,
-    },
+  // 表格列定义
+  const tidCols = [
+    { title: '#', key: 'idx', width: 40, render: (_: any, __: any, i: number) => i + 1 },
+    { title: 'TID 设备号', dataIndex: 'tid', key: 'tid' },
+    { title: '车架号(VIN)', dataIndex: 'vin', key: 'vin',
+      render: (v: string) => v || <Text type="secondary">-</Text> },
+    { title: '车牌号', dataIndex: 'plate_no', key: 'plate_no',
+      render: (p: string) => p || <Text type="secondary">-</Text> },
+    { title: '', key: 'act', width: 40,
+      render: (_: any, __: any, i: number) => (
+        <Button type="text" danger size="small" icon={<DeleteOutlined />}
+          onClick={() => removeTID(i)} disabled={tidEntries.length <= 1} />
+      )},
+  ];
+
+  const cosCols = [
+    { title: '', key: 'cb', width: 40,
+      render: (_: any, r: COSFileInfo) => (
+        <Checkbox checked={selectedCOSFiles.has(r.key)} onChange={() => toggleCOSFile(r.key)} />
+      )},
+    { title: '文件名', dataIndex: 'name', key: 'name',
+      render: (n: string) => <Space><FileOutlined /><Text ellipsis={{ tooltip: n }}>{n}</Text></Space> },
+    { title: '大小', dataIndex: 'size_str', key: 'size_str', width: 100 },
+    { title: '修改时间', dataIndex: 'last_mod', key: 'last_mod', width: 170 },
+  ];
+
+  // 展开行 - 显示详细日志
+  const expandedRowRender = (record: TaskStatusType) => {
+    if (!record.logs || record.logs.length === 0) {
+      return <Text type="secondary">暂无日志</Text>;
+    }
+    return (
+      <div style={{ maxHeight: 300, overflow: 'auto', background: '#f6f8fa', padding: '8px 12px', borderRadius: 4 }}>
+        {record.logs.map((log, i) => (
+          <div key={i} style={{
+            fontSize: 12, fontFamily: 'monospace',
+            padding: '2px 0', color: log.includes('❌') ? '#cf1322'
+              : log.includes('✅') ? '#389e0d'
+              : log.includes('⬇') || log.includes('🔍') || log.includes('📝') || log.includes('💾') ? '#096dd9'
+              : log.includes('⚠') ? '#d48806'
+              : log.includes('  ↓') || log.includes('  ↑') || log.includes('  🔄') ? '#666'
+              : '#333',
+          }}>
+            {log}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const taskCols = [
+    { title: '状态', dataIndex: 'status', key: 'status', width: 80,
+      render: (s: string) =>
+        s === 'completed' ? <Tag icon={<CheckCircleOutlined />} color="success">完成</Tag>
+        : s === 'failed' ? <Tag icon={<CloseCircleOutlined />} color="error">失败</Tag>
+        : <Tag icon={<LoadingOutlined />} color="processing">运行中</Tag> },
+    { title: '阶段/日志', dataIndex: 'stage', key: 'stage', width: 200, ellipsis: true },
+    { title: '进度', dataIndex: 'progress', key: 'progress', width: 140,
+      render: (p: number) => <Progress percent={Math.round(p)} size="small" style={{ margin: 0 }} /> },
+    { title: 'TIDs', dataIndex: 'tids', key: 'tids', width: 50,
+      render: (t: string[]) => <Tag>{t?.length || 0}</Tag> },
+    { title: '耗时', dataIndex: 'elapsed', key: 'elapsed', width: 70 },
   ];
 
   return (
-    <div className="filter-task-panel">
-      <Row gutter={24}>
+    <div>
+      <Row gutter={16}>
         <Col xs={24} lg={14}>
-          {/* TID输入 */}
-          <Card
-            title={
-              <Space>
-                <CopyOutlined />
-                <span>TID设备号列表</span>
-              </Space>
-            }
+          {/* TID列表 */}
+          <Card title={<Space><CopyOutlined /><span>TID设备号列表</span></Space>}
+            extra={
+              <Button icon={<ImportOutlined />} onClick={handleImportClick}
+                size="small" loading={importLoading}>从CSV导入</Button>
+            } style={{ marginBottom: 16 }}>
+            <input type="file" ref={fileInputRef} accept=".csv"
+              style={{ display: 'none' }} onChange={handleCSVFile} />
+            {importFileName &&
+              <Alert message={`CSV: ${importFileName}`} type="info" showIcon closable
+                onClose={() => setImportFileName('')} style={{ marginBottom: 8 }} />}
+            {tidEntries.length === 0
+              ? <Text type="secondary">暂无TID，请通过"从CSV导入"导入绑定流水数据</Text>
+              : <Table dataSource={tidEntries} columns={tidCols}
+                  rowKey={(_, i) => String(i)} pagination={false} size="small" />}
+            {tidEntries.length > 0 &&
+              <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
+                共 {tidEntries.length} 个TID
+              </Text>}
+          </Card>
+
+          {/* COS文件 */}
+          <Card title={<Space><CloudDownloadOutlined /><span>COS存储桶文件</span></Space>}
             extra={
               <Space>
-                <Button
-                  icon={<ImportOutlined />}
-                  onClick={handleImportFromBindLog}
-                  size="small"
-                  loading={importLoading}
-                >
-                  从绑定流水导入
-                </Button>
-                <Button icon={<PlusOutlined />} onClick={addTID} size="small">
-                  添加
-                </Button>
-                <Button onClick={handleBatchPasteTID} size="small">
-                  批量粘贴
-                </Button>
+                {selectedCOSFiles.size > 0 && <Tag color="blue">已选 {selectedCOSFiles.size}</Tag>}
+                <Button icon={<ReloadOutlined />} onClick={loadCOSFiles} size="small" loading={cosLoading}>刷新</Button>
               </Space>
-            }
-            style={{ marginBottom: 16 }}
-          >
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={{ width: 40, padding: '4px', textAlign: 'center' }}>#</th>
-                  <th style={{ padding: '4px', textAlign: 'left' }}>TID 设备号</th>
-                  <th style={{ padding: '4px', textAlign: 'left' }}>车架号(VIN)</th>
-                  <th style={{ padding: '4px', textAlign: 'left' }}>车牌号</th>
-                  <th style={{ width: 40, padding: '4px', textAlign: 'center' }}>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tidEntries.map((entry, index) => (
-                  <tr key={index}>
-                    <td style={{ padding: '4px', textAlign: 'center', verticalAlign: 'top' }}>
-                      <Text type="secondary">{index + 1}</Text>
-                    </td>
-                    <td style={{ padding: '4px' }}>
-                      <Input
-                        placeholder="输入TID设备号"
-                        value={entry.tid}
-                        onChange={(e) => updateTID(index, e.target.value)}
-                        allowClear
-                        style={{ fontFamily: 'monospace' }}
-                      />
-                    </td>
-                    <td style={{ padding: '4px' }}>
-                      <Input
-                        placeholder="车架号"
-                        value={entry.vin}
-                        onChange={(e) => updateVIN(index, e.target.value)}
-                        allowClear
-                        style={{ fontFamily: 'monospace', fontSize: 12 }}
-                      />
-                    </td>
-                    <td style={{ padding: '4px' }}>
-                      <Input
-                        placeholder="车牌号"
-                        value={entry.plate_no}
-                        onChange={(e) => updatePlateNo(index, e.target.value)}
-                        allowClear
-                        style={{ fontSize: 12 }}
-                      />
-                    </td>
-                    <td style={{ padding: '4px', textAlign: 'center' }}>
-                      <Button
-                        type="text"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={() => removeTID(index)}
-                        disabled={tidEntries.length <= 1}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
-              共 {tidEntries.length} 个TID，有效 {tidEntries.filter(e => e.tid.trim()).length} 个
-            </Text>
+            } style={{ marginBottom: 16 }}>
+            <Table dataSource={cosFiles} columns={cosCols} rowKey="key"
+              size="small" loading={cosLoading} pagination={{ pageSize: 15, size: 'small' }}
+              locale={{ emptyText: 'COS中暂无文件' }} />
           </Card>
         </Col>
 
         <Col xs={24} lg={10}>
           {/* 时间范围 */}
-          <Card
-            title={
-              <Space>
-                <ClockCircleOutlined />
-                <span>时间范围</span>
-              </Space>
-            }
-            style={{ marginBottom: 16 }}
-          >
+          <Card title={<Space><ClockCircleOutlined /><span>时间范围</span></Space>} style={{ marginBottom: 16 }}>
             <Form layout="vertical">
-              <Form.Item label="开始时间 - 结束时间" required>
-                <RangePicker
-                  showTime
-                  value={timeRange}
-                  onChange={(dates) => setTimeRange(dates || [null, null])}
-                  style={{ width: '100%' }}
-                  format="YYYY-MM-DD HH:mm:ss"
-                  placeholder={['开始时间', '结束时间']}
-                />
+              <Form.Item label="开始 - 结束时间" required>
+                <RangePicker showTime value={timeRange}
+                  onChange={d => setTimeRange(d || [null, null])}
+                  style={{ width: '100%' }} format="YYYY-MM-DD HH:mm:ss" />
+              </Form.Item>
+              <Form.Item label="并行线程数">
+                <InputNumber value={workerCount} min={1} max={64}
+                  onChange={v => setWorkerCount(v || 4)} style={{ width: '100%' }} />
               </Form.Item>
             </Form>
-            <Alert
-              message="过滤规则：只保留GPS时间在选定范围内的记录"
-              type="info"
-              showIcon
-              style={{ marginTop: 8 }}
-            />
           </Card>
-        </Col>
-      </Row>
 
-      <Row gutter={24}>
-        <Col xs={24} lg={14}>
-          {/* 目录配置 */}
-          <Card
-            title={
-              <Space>
-                <FolderOpenOutlined />
-                <span>文件目录设置</span>
-              </Space>
-            }
-            extra={
-              <Button onClick={loadArchiveFiles} size="small">
-                查看归档文件
+          {/* 执行任务 */}
+          <Card title={<span>执行任务</span>} style={{ marginBottom: 16 }}>
+            <div style={{ textAlign: 'center' }}>
+              <Button type="primary" icon={<PlayCircleOutlined />}
+                onClick={handleCreateTask} loading={taskLoading}
+                size="large" style={{ height: 44, padding: '0 40px', fontSize: 15 }}>
+                生成执行任务
               </Button>
-            }
-            style={{ marginBottom: 16 }}
-          >
-            <Form layout="vertical">
-              <Form.Item label="归档数据文件目录">
-                <Input
-                  value={archiveDir}
-                  onChange={(e) => setArchiveDir(e.target.value)}
-                  placeholder="./archive"
-                />
-              </Form.Item>
-              <Form.Item label="指定归档文件（可选）" help="留空则处理目录下所有.sql/.csv文件">
-                <Input
-                  value={archiveFile}
-                  onChange={(e) => setArchiveFile(e.target.value)}
-                  placeholder="例如: data_202401.sql"
-                />
-              </Form.Item>
-              <Form.Item label="过滤结果输出目录">
-                <Input
-                  value={outputDir}
-                  onChange={(e) => setOutputDir(e.target.value)}
-                  placeholder="./output"
-                />
-              </Form.Item>
-            </Form>
-
-            {/* 归档文件列表 */}
-            {showFiles && (
-              <div style={{ marginTop: 12 }}>
-                <Divider>归档文件列表</Divider>
-                {archiveFiles.length > 0 ? (
-                  <Table
-                    dataSource={archiveFiles}
-                    columns={fileColumns}
-                    rowKey="file_name"
-                    size="small"
-                    pagination={{ pageSize: 5, size: 'small' }}
-                  />
-                ) : (
-                  <Text type="warning">目录中未找到归档文件</Text>
-                )}
-              </div>
-            )}
+            </div>
+            <Alert style={{ marginTop: 12 }}
+              message="流程: 下载COS文件 → TID过滤 → 导出SQL → 导入MySQL" type="info" showIcon />
           </Card>
-        </Col>
 
-        <Col xs={24} lg={10}>
-          {/* 处理参数 */}
-          <Card
-            title={
-              <Space>
-                <PlayCircleOutlined />
-                <span>处理参数</span>
-              </Space>
-            }
-            style={{ marginBottom: 16 }}
-          >
-            <Form layout="vertical">
-              <Form.Item
-                label="并行处理线程数"
-                help="建议设置为CPU核心数的1-2倍"
-              >
-                <InputNumber
-                  value={workerCount}
-                  onChange={(v) => setWorkerCount(v || 4)}
-                  min={1}
-                  max={64}
-                  style={{ width: '100%' }}
-                />
-              </Form.Item>
-            </Form>
+          {/* 任务列表 */}
+          <Card title={<span>任务列表</span>} style={{ marginBottom: 16 }}
+            extra={<Button size="small" onClick={loadTasks}>刷新</Button>}>
+            {tasks.length === 0
+              ? <Text type="secondary">暂无任务</Text>
+              : <Table dataSource={tasks} columns={taskCols}
+                  rowKey="task_id" size="small" pagination={{ pageSize: 5 }}
+                  expandable={{ expandedRowRender, rowExpandable: () => true }} />}
           </Card>
         </Col>
       </Row>
-
-      {/* 启动按钮 */}
-      <div style={{ textAlign: 'center', marginTop: 24, marginBottom: 16 }}>
-        <Button
-          type="primary"
-          icon={<PlayCircleOutlined />}
-          onClick={handleStartFilter}
-          loading={loading}
-          size="large"
-          style={{ height: 48, paddingLeft: 48, paddingRight: 48, fontSize: 16 }}
-        >
-          启动过滤任务
-        </Button>
-      </div>
-
-      <Alert
-        message="任务流程说明"
-        description={
-          <ol style={{ margin: 0, paddingLeft: 20 }}>
-            <li>从归档数据文件目录中读取SQL/CSV数据文件</li>
-            <li>根据输入的TID列表过滤出指定设备的数据记录</li>
-            <li>将过滤后的数据导入到临时MySQL数据库</li>
-            <li>从临时数据库中按TID分别导出为独立的SQL文件</li>
-            <li>输出文件以 TID.sql 命名，存放在输出目录中</li>
-          </ol>
-        }
-        type="info"
-        showIcon
-      />
     </div>
   );
 };

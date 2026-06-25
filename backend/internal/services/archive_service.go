@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"os"
@@ -618,6 +619,7 @@ func (as *ArchiveService) exportToSQLFiles(
 		return fmt.Errorf("创建输出目录失败: %w", err)
 	}
 
+	as.taskManager.AddLog(taskID, "  📝 导出 %d 个TID的SQL文件到 %s", len(tids), outputDir)
 	totalTIDs := len(tids)
 	for idx, tid := range tids {
 		select {
@@ -740,4 +742,400 @@ func escapeSQLString(s string) string {
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	s = strings.ReplaceAll(s, "\r", "\\r")
 	return s
+}
+
+// ========== COS Pipeline 新任务流程 ==========
+
+// COSPipelineRequest COS管道任务请求
+type COSPipelineRequest struct {
+	TIDs        []string
+	StartTime   string
+	EndTime     string
+	COSFiles    []string // COS中的文件路径列表
+	WorkDir     string   // 本地工作目录
+	WorkerCount int
+	COSService  *COSService
+}
+
+// SaveTIDFile 将TID列表保存到文件
+func SaveTIDFile(workDir string, tids []TIDWithPlate) (string, error) {
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		return "", fmt.Errorf("创建工作目录失败: %w", err)
+	}
+	tidFilePath := filepath.Join(workDir, "tid_list.txt")
+	f, err := os.Create(tidFilePath)
+	if err != nil {
+		return "", fmt.Errorf("创建TID文件失败: %w", err)
+	}
+	defer f.Close()
+	for _, t := range tids {
+		line := t.TID
+		if t.VIN != "" {
+			line += "," + t.VIN
+		}
+		if t.PlateNo != "" {
+			line += "," + t.PlateNo
+		}
+		fmt.Fprintln(f, line)
+	}
+	return tidFilePath, nil
+}
+
+// TIDWithPlate TID信息（含车牌）
+type TIDWithPlate struct {
+	TID     string
+	VIN     string
+	PlateNo string
+}
+
+// StartCOSPipeline 启动COS管道任务：下载→过滤→导出SQL→导入MySQL
+func (as *ArchiveService) StartCOSPipeline(ctx context.Context, taskID string, req COSPipelineRequest) {
+	as.taskManager.AddLog(taskID, "🚀 任务启动，共 %d 个COS文件，%d 个TID", len(req.COSFiles), len(req.TIDs))
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.Status = "running"
+		t.Stage = "正在从COS下载文件..."
+		t.TotalFiles = len(req.COSFiles)
+	})
+
+	cfg := config.Get()
+	workDir := req.WorkDir
+	if workDir == "" {
+		workDir = cfg.WorkDir
+	}
+	downloadDir := filepath.Join(workDir, "downloads")
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		as.failTask(taskID, fmt.Sprintf("创建下载目录失败: %v", err))
+		return
+	}
+	as.taskManager.AddLog(taskID, "📁 工作目录: %s", workDir)
+
+	// === 步骤1: 下载COS文件到本地 ===
+	as.taskManager.AddLog(taskID, "⬇️ 【步骤1/4】开始从COS下载 %d 个文件...", len(req.COSFiles))
+	localFiles := make([]string, 0, len(req.COSFiles))
+	for i, cosKey := range req.COSFiles {
+		select {
+		case <-ctx.Done():
+			as.failTask(taskID, "任务已取消")
+			return
+		default:
+		}
+
+		localName := filepath.Base(cosKey)
+		localPath := filepath.Join(downloadDir, localName)
+
+		as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+			t.CurrentFile = fmt.Sprintf("下载: %s", localName)
+			t.Stage = fmt.Sprintf("正在从COS下载文件 (%d/%d)", i+1, len(req.COSFiles))
+		})
+
+		as.taskManager.AddLog(taskID, "  ↓ 下载 [%d/%d] %s", i+1, len(req.COSFiles), localName)
+		if err := req.COSService.DownloadFile(cosKey, localPath); err != nil {
+			as.failTask(taskID, fmt.Sprintf("下载COS文件失败 %s: %v", cosKey, err))
+			return
+		}
+
+		localFiles = append(localFiles, localPath)
+		as.taskManager.AddLog(taskID, "  ✓ 完成: %s", localName)
+		as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+			t.ProcessedFiles = i + 1
+			t.Progress = float64(i+1) / float64(len(req.COSFiles)+2) * 30
+		})
+	}
+	as.taskManager.AddLog(taskID, "✅ 【步骤1/4】全部 %d 个文件下载完成", len(localFiles))
+
+	// === 步骤2: 过滤归档文件并导入临时数据库 ===
+	as.taskManager.AddLog(taskID, "🔍 【步骤2/4】开始过滤数据并导入临时数据库...")
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.Stage = "正在过滤数据并导入临时数据库..."
+		t.CurrentFile = ""
+		t.TotalFiles = len(localFiles)
+		t.ProcessedFiles = 0
+	})
+
+	// 连接临时数据库
+	as.taskManager.AddLog(taskID, "  🔗 连接临时数据库 %s@%s:%d/%s", cfg.TempDB.User, cfg.TempDB.Host, cfg.TempDB.Port, cfg.TempDB.DBName)
+	tempDB, err := database.Connect(cfg.TempDB)
+	if err != nil {
+		as.failTask(taskID, fmt.Sprintf("连接临时数据库失败: %v", err))
+		return
+	}
+	defer tempDB.Close()
+	as.taskManager.AddLog(taskID, "  ✓ 数据库连接成功")
+
+	err = database.EnsureTempTable(tempDB, "gps_archive_data", as.getTableSchema())
+	if err != nil {
+		as.failTask(taskID, fmt.Sprintf("创建临时表失败: %v", err))
+		return
+	}
+	as.taskManager.AddLog(taskID, "  ✓ 临时表已就绪")
+
+	// 构建TID集合
+	tidSet := make(map[string]bool)
+	for _, t := range req.TIDs {
+		tidSet[t] = true
+	}
+	as.taskManager.AddLog(taskID, "  📋 TID集合: %d 个设备", len(tidSet))
+
+	totalFiltered, err := as.processArchiveFilesGZip(ctx, taskID, localFiles, tidSet, req.StartTime, req.EndTime, tempDB, req.WorkerCount)
+	if err != nil {
+		as.failTask(taskID, fmt.Sprintf("处理归档文件失败: %v", err))
+		return
+	}
+
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.FilteredRecords = totalFiltered
+	})
+	as.taskManager.AddLog(taskID, "✅ 【步骤2/4】过滤完成，共匹配 %d 条记录", totalFiltered)
+
+	// === 步骤3: 导出到SQL文件 ===
+	as.taskManager.AddLog(taskID, "📝 【步骤3/4】开始导出SQL文件...")
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.Stage = "正在导出到SQL文件..."
+	})
+
+	outputDir := filepath.Join(workDir, "output")
+	err = as.exportToSQLFiles(ctx, taskID, tempDB, req.TIDs, outputDir)
+	if err != nil {
+		as.failTask(taskID, fmt.Sprintf("导出SQL文件失败: %v", err))
+		return
+	}
+	as.taskManager.AddLog(taskID, "✅ 【步骤3/4】SQL文件导出完成，输出目录: %s", outputDir)
+
+	// === 步骤4: 导入SQL到MySQL（自动执行SQL文件） ===
+	as.taskManager.AddLog(taskID, "💾 【步骤4/4】开始导入SQL到临时数据库...")
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.Stage = "正在导入SQL到临时数据库..."
+	})
+
+	importCount := 0
+	for idx, tid := range req.TIDs {
+		select {
+		case <-ctx.Done():
+			as.failTask(taskID, "任务已取消")
+			return
+		default:
+		}
+
+		sqlFile := filepath.Join(outputDir, fmt.Sprintf("%s.sql", tid))
+		if _, err := os.Stat(sqlFile); os.IsNotExist(err) {
+			as.taskManager.AddLog(taskID, "  ⚠ TID=%s 无匹配数据，跳过", tid)
+			continue
+		}
+
+		as.taskManager.AddLog(taskID, "  ↑ 导入 [%d/%d] %s.sql", importCount+1, len(req.TIDs), tid)
+		as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+			t.CurrentFile = fmt.Sprintf("导入SQL: %s.sql", tid)
+		})
+
+		sqlContent, err := os.ReadFile(sqlFile)
+		if err != nil {
+			as.failTask(taskID, fmt.Sprintf("读取SQL文件失败 %s: %v", sqlFile, err))
+			return
+		}
+
+		stmtCount := 0
+		statements := strings.Split(string(sqlContent), ";\n")
+		for _, stmt := range statements {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" || strings.HasPrefix(stmt, "--") {
+				continue
+			}
+			if _, err := tempDB.Exec(stmt); err != nil {
+				as.failTask(taskID, fmt.Sprintf("执行SQL失败(TID=%s): %v", tid, err))
+				return
+			}
+			stmtCount++
+		}
+		importCount++
+		as.taskManager.AddLog(taskID, "  ✓ %s.sql 导入完成 (%d 条语句)", tid, stmtCount)
+
+		as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+			t.ExportedRecords++
+			if len(req.TIDs) > 0 {
+				t.Progress = 70 + (float64(idx+1)/float64(len(req.TIDs)))*30
+			}
+		})
+	}
+
+	// 完成
+	as.taskManager.AddLog(taskID, "✅ 全部步骤完成！共导入 %d 个TID的数据到临时数据库", importCount)
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.Status = "completed"
+		t.Stage = "任务完成"
+		t.Progress = 100
+	})
+}
+
+// processArchiveFilesGZip 处理归档文件（支持.gz压缩文件）
+func (as *ArchiveService) processArchiveFilesGZip(
+	ctx context.Context,
+	taskID string,
+	files []string,
+	tidSet map[string]bool,
+	startTime, endTime string,
+	tempDB *sqlx.DB,
+	workerCount int,
+) (int64, error) {
+	as.taskManager.AddLog(taskID, "  📂 开始处理 %d 个归档文件，%d 个worker并行", len(files), workerCount)
+	var totalFiltered int64
+	var mu sync.Mutex
+	fileChan := make(chan string, len(files))
+	errChan := make(chan error, workerCount)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for filePath := range fileChan {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+					t.CurrentFile = filepath.Base(filePath)
+				})
+
+				as.taskManager.AddLog(taskID, "  🔄 worker#%d 处理: %s", id, filepath.Base(filePath))
+				filtered, err := as.processSingleFileGZip(filePath, tidSet, startTime, endTime, tempDB)
+				if err != nil {
+					errChan <- fmt.Errorf("处理文件 %s 失败: %w", filePath, err)
+					return
+				}
+				as.taskManager.AddLog(taskID, "  ✓ worker#%d 完成: %s (匹配 %d 条)", id, filepath.Base(filePath), filtered)
+
+				mu.Lock()
+				totalFiltered += filtered
+				as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+					t.ProcessedFiles++
+					t.FilteredRecords = totalFiltered
+					if t.TotalFiles > 0 {
+						t.Progress = 30 + (float64(t.ProcessedFiles)/float64(t.TotalFiles))*40
+					}
+				})
+				mu.Unlock()
+			}
+		}(i)
+	}
+
+	go func() {
+		for _, f := range files {
+			fileChan <- f
+		}
+		close(fileChan)
+	}()
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			return totalFiltered, err
+		}
+	}
+
+	return totalFiltered, nil
+}
+
+// processSingleFileGZip 处理单个归档文件（支持.gz压缩）
+func (as *ArchiveService) processSingleFileGZip(
+	filePath string,
+	tidSet map[string]bool,
+	startTime, endTime string,
+	tempDB *sqlx.DB,
+) (int64, error) {
+	var file *os.File
+	var err error
+
+	file, err = os.Open(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("打开文件失败: %w", err)
+	}
+	defer file.Close()
+
+	var reader *bufio.Scanner
+	isGzip := strings.HasSuffix(strings.ToLower(filePath), ".gz")
+
+	if isGzip {
+		gzReader, err := gzip.NewReader(file)
+		if err != nil {
+			return 0, fmt.Errorf("解压gzip失败: %w", err)
+		}
+		defer gzReader.Close()
+		scanner := bufio.NewScanner(gzReader)
+		scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+		reader = scanner
+	} else {
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+		reader = scanner
+	}
+
+	insertRe := regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+`)
+	var filteredCount int64
+	var batchRows [][]interface{}
+	var currentColumns []string
+	var currentTable string
+	maxBatchSize := 500
+
+	for reader.Scan() {
+		line := reader.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if insertRe.MatchString(trimmed) {
+			tableName, columns, rows := parseInsertStatement(trimmed)
+			if tableName == "" || len(rows) == 0 {
+				continue
+			}
+			currentTable = tableName
+			currentColumns = columns
+
+			for _, row := range rows {
+				tidValue := extractTIDFromRow(row, columns)
+				if tidValue == "" || !tidSet[tidValue] {
+					continue
+				}
+				if startTime != "" && endTime != "" {
+					timeValue := extractTimeFromRow(row, columns)
+					if timeValue != "" && !isTimeInRange(timeValue, startTime, endTime) {
+						continue
+					}
+				}
+				batchRows = append(batchRows, row)
+				filteredCount++
+				if len(batchRows) >= maxBatchSize {
+					if err := database.BatchInsert(tempDB, currentTable, currentColumns, batchRows); err != nil {
+						return filteredCount, fmt.Errorf("批量插入失败: %w", err)
+					}
+					batchRows = batchRows[:0]
+				}
+			}
+		}
+	}
+
+	if len(batchRows) > 0 {
+		if err := database.BatchInsert(tempDB, currentTable, currentColumns, batchRows); err != nil {
+			return filteredCount, fmt.Errorf("批量插入剩余数据失败: %w", err)
+		}
+	}
+
+	if err := reader.Err(); err != nil {
+		return filteredCount, fmt.Errorf("读取文件失败: %w", err)
+	}
+
+	return filteredCount, nil
+}
+
+func (as *ArchiveService) failTask(taskID string, errMsg string) {
+	as.taskManager.AddLog(taskID, "❌ 任务失败: %s", errMsg)
+	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
+		t.Status = "failed"
+		t.Stage = "失败"
+		t.Error = errMsg
+	})
 }

@@ -39,9 +39,10 @@ func main() {
 	vehicleService := services.NewVehicleService()
 	archiveService := services.NewArchiveService(taskManager)
 	bindLogService := services.NewBindLogService()
+	cosService := services.NewCOSService()
 
 	// 创建处理器
-	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService)
+	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService, cosService)
 
 	// 创建Gin路由
 	r := gin.Default()
@@ -83,9 +84,17 @@ func main() {
 		api.GET("/filter/tasks", h.ListTasks)
 		api.DELETE("/filter/task/:taskId", h.DeleteTask)
 
+		// COS存储桶文件管理
+		api.GET("/cos/files", h.ListCOSFiles)
+
+		// 过滤任务(COS管道)
+		api.POST("/filter/cos-task", h.CreateCOSFilterTask)
+
 		// 设备绑定流水查询(t_bind_log)
 		api.POST("/bindlog/query", h.QueryBindLog)
-		api.POST("/bindlog/query-tids-by-time", h.QueryTIDsByTimeRange)
+
+		// 导入绑定流水CSV文件，按时间范围过滤TID
+		api.POST("/filter/import-csv", h.ImportCSV)
 	}
 
 	// 优雅关闭

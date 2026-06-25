@@ -18,12 +18,19 @@ export interface DBConfig {
   db_name: string;
 }
 
+export interface COSConfig {
+  secret_id: string;
+  secret_key: string;
+  bucket: string;
+  region: string;
+  base_dir: string;
+}
+
 export interface AppConfig {
   temp_db: DBConfig;
   vehicle_db: DBConfig;
-  archive_dir: string;
-  archive_file: string;
-  output_dir: string;
+  cos_config: COSConfig;
+  work_dir: string;
   worker_count: number;
 }
 
@@ -59,6 +66,7 @@ export interface TaskStatus {
   task_id: string;
   status: string;
   progress: number;
+  stage: string;
   total_files: number;
   processed_files: number;
   total_records: number;
@@ -66,11 +74,13 @@ export interface TaskStatus {
   exported_records: number;
   current_file: string;
   tids: string[];
+  cos_files: string[];
   start_time: string;
   end_time: string;
   error?: string;
   start_at: string;
   elapsed: string;
+  logs: string[];
 }
 
 export interface ArchiveFileInfo {
@@ -79,14 +89,22 @@ export interface ArchiveFileInfo {
   file_size: number;
 }
 
+export interface COSFileInfo {
+  key: string;
+  name: string;
+  size: number;
+  size_str: string;
+  last_mod: string;
+}
+
 export interface FilterStartRequest {
   tids: string[];
   start_time: string;
   end_time: string;
-  archive_dir: string;
-  archive_file: string;
-  output_dir: string;
-  worker_count: number;
+  archive_dir?: string;
+  archive_file?: string;
+  output_dir?: string;
+  worker_count?: number;
 }
 
 // ============ API 方法 ============
@@ -170,7 +188,7 @@ export interface BindLogResponse {
 export const queryBindLog = (req: BindLogRequest) =>
   api.post<BindLogResponse>('/bindlog/query', req);
 
-// ============ TID导入（按时间范围） ============
+// ============ CSV导入TID（按时间范围） ============
 
 export interface TIDImportItem {
   tid: string;
@@ -183,8 +201,36 @@ export interface TIDImportResponse {
   tids: TIDImportItem[];
 }
 
-// 按时间范围查询所有TID（含车架号和车牌号）
-export const queryTIDsByTimeRange = (start: string, end: string) =>
-  api.post<TIDImportResponse>('/bindlog/query-tids-by-time', { start, end });
+// 上传绑定流水CSV文件，返回所有TID列表（含车架号和车牌号）
+export const importCSV = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post<TIDImportResponse>('/filter/import-csv', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
+// ============ COS存储桶 ============
+
+// 列出COS存储桶中的文件
+export const listCOSFiles = (prefix?: string) =>
+  api.get<{ total: number; files: COSFileInfo[] }>('/cos/files', {
+    params: prefix ? { prefix } : {},
+  });
+
+// ============ COS过滤任务 ============
+
+export interface CreateCOSFilterTaskRequest {
+  tids: string[];
+  vins: string[];
+  plate_nos: string[];
+  start_time: string;
+  end_time: string;
+  cos_files: string[];
+}
+
+// 创建COS过滤任务
+export const createCOSFilterTask = (req: CreateCOSFilterTaskRequest) =>
+  api.post<{ task_id: string; message: string }>('/filter/cos-task', req);
 
 export default api;
