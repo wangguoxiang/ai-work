@@ -44,6 +44,11 @@ func main() {
 	// 创建处理器
 	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService, cosService)
 
+	// 启动CSV过滤器管理器(自动恢复未完成任务)
+	csvFilterMgr := h.GetCSVFilterManager()
+	csvFilterMgr.ResumeOnStartup(".")
+	log.Println("CSV过滤器管理器已启动")
+
 	// 创建Gin路由
 	r := gin.Default()
 
@@ -95,6 +100,12 @@ func main() {
 
 		// 导入绑定流水CSV文件，按时间范围过滤TID
 		api.POST("/filter/import-csv", h.ImportCSV)
+
+		// CSV过滤任务(直接从gzip SQL文件按CSV绑定段过滤)
+		api.POST("/filter/csv-upload", h.UploadCSVFile)
+		api.POST("/filter/csv-submit", h.StartCSVFilter)
+		api.GET("/filter/csv-tasks", h.ListCSVFilterTasks)
+		api.GET("/filter/csv-cancel", h.CancelCSVFilterTask)
 	}
 
 	// 优雅关闭

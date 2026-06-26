@@ -199,6 +199,8 @@ export interface TIDImportItem {
 export interface TIDImportResponse {
   total: number;
   tids: TIDImportItem[];
+  file_path?: string;
+  file_name?: string;
 }
 
 // 上传绑定流水CSV文件，返回所有TID列表（含车架号和车牌号）
@@ -232,5 +234,64 @@ export interface CreateCOSFilterTaskRequest {
 // 创建COS过滤任务
 export const createCOSFilterTask = (req: CreateCOSFilterTaskRequest) =>
   api.post<{ task_id: string; message: string }>('/filter/cos-task', req);
+
+// ============ CSV过滤任务(从gzip SQL文件按CSV绑定段过滤) ============
+
+export interface CSVFilterRequest {
+  tar_paths?: string[];
+  cos_files?: string[];
+  csv_path: string;
+  output_path?: string;
+  restart?: boolean;
+}
+
+export interface CSVSubmittedTask {
+  tar_path: string;
+  task_id: string;
+  resumed_from: number;
+  error?: string;
+}
+
+export interface CSVFilterTask {
+  id: string;
+  tar_path: string;
+  csv_path: string;
+  output_path: string;
+  status: string;
+  error?: string;
+  started_at: number;
+  updated_at: number;
+  finished_at?: number;
+  lines_done: number;
+  raw_lines: number;
+  kept_lines: number;
+  first_ts: number;
+  last_ts: number;
+  resumed: boolean;
+  pct: number;
+  submit_order: number;
+}
+
+// 提交CSV过滤任务
+export const submitCSVFilter = (req: CSVFilterRequest) =>
+  api.post<{ tasks: CSVSubmittedTask[] }>('/filter/csv-submit', req);
+
+// 获取CSV过滤任务列表
+export const listCSVFilterTasks = () =>
+  api.get<{ tasks: CSVFilterTask[] }>('/filter/csv-tasks');
+
+// 取消CSV过滤任务
+export const cancelCSVFilterTask = (id: string) =>
+  api.get('/filter/csv-cancel', { params: { id } });
+
+// 上传CSV文件到服务器
+export const uploadCSVFile = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post<{ file_name: string; file_path: string; file_size: number }>('/filter/csv-upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  });
+};
 
 export default api;

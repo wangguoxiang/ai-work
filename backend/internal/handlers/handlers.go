@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +26,7 @@ type Handler struct {
 	taskManager    *services.TaskManager
 	bindLogService *services.BindLogService
 	cosService     *services.COSService
+	csvFilterMgr   *services.CSVFilterTaskManager
 }
 
 // NewHandler 创建处理器
@@ -34,6 +37,7 @@ func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *se
 		taskManager:    tm,
 		bindLogService: bls,
 		cosService:     cs,
+		csvFilterMgr:   services.NewCSVFilterTaskManager(),
 	}
 }
 
@@ -144,8 +148,8 @@ func (h *Handler) SaveFullConfig(c *gin.Context) {
 func (h *Handler) StartFilter(c *gin.Context) {
 	var req struct {
 		TIDs        []string `json:"tids" binding:"required"`
-		StartTime   string   `json:"start_time" binding:"required"`
-		EndTime     string   `json:"end_time" binding:"required"`
+		StartTime   string   `json:"start_time"`
+		EndTime     string   `json:"end_time"`
 		ArchiveDir  string   `json:"archive_dir"`
 		ArchiveFile string   `json:"archive_file"`
 		OutputDir   string   `json:"output_dir"`
@@ -159,18 +163,6 @@ func (h *Handler) StartFilter(c *gin.Context) {
 
 	if len(req.TIDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少提供一个TID"})
-		return
-	}
-
-	// 验证时间格式
-	_, err := time.Parse("2006-01-02 15:04:05", req.StartTime)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "开始时间格式无效，请使用 YYYY-MM-DD HH:MM:SS 格式"})
-		return
-	}
-	_, err = time.Parse("2006-01-02 15:04:05", req.EndTime)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "结束时间格式无效，请使用 YYYY-MM-DD HH:MM:SS 格式"})
 		return
 	}
 
@@ -308,6 +300,7 @@ func (h *Handler) QueryBindLog(c *gin.Context) {
 }
 
 // ImportCSV 导入绑定流水CSV文件，返回TID列表（含车架号和车牌号）
+// 同时将CSV文件保存到服务器 work_dir/uploads/ 目录，返回 file_path
 func (h *Handler) ImportCSV(c *gin.Context) {
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
@@ -316,13 +309,37 @@ func (h *Handler) ImportCSV(c *gin.Context) {
 	}
 	defer file.Close()
 
-	if header == nil || (!strings.HasSuffix(strings.ToLower(header.Filename), ".csv") && header.Header.Get("Content-Type") != "text/csv") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV格式文件"})
+	if header == nil || !strings.HasSuffix(strings.ToLower(header.Filename), ".csv") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV格式文件(.csv)"})
 		return
 	}
 
-	// 读取CSV
-	reader := csv.NewReader(file)
+	// 先将文件保存到服务器磁盘
+	cfg := config.Get()
+	uploadDir := filepath.Join(cfg.WorkDir, "uploads")
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建上传目录失败: " + err.Error()})
+		return
+	}
+
+	saveName := fmt.Sprintf("%d_%s", time.Now().Unix(), header.Filename)
+	savePath := filepath.Join(uploadDir, saveName)
+
+	// 读取原始文件内容到内存，同时保存到磁盘
+	rawData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败: " + err.Error()})
+		return
+	}
+
+	if err := os.WriteFile(savePath, rawData, 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败: " + err.Error()})
+		return
+	}
+	log.Printf("[CSV导入] 已保存: %s (%d bytes)", savePath, len(rawData))
+
+	// 从内存数据解析CSV
+	reader := csv.NewReader(strings.NewReader(string(rawData)))
 	records, err := reader.ReadAll()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV文件解析失败: " + err.Error()})
@@ -330,7 +347,7 @@ func (h *Handler) ImportCSV(c *gin.Context) {
 	}
 
 	if len(records) < 2 {
-		c.JSON(http.StatusOK, gin.H{"total": 0, "tids": []interface{}{}})
+		c.JSON(http.StatusOK, gin.H{"total": 0, "tids": []interface{}{}, "file_path": savePath})
 		return
 	}
 
@@ -408,8 +425,10 @@ func (h *Handler) ImportCSV(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"total": len(items),
-		"tids":  items,
+		"total":     len(items),
+		"tids":      items,
+		"file_path": savePath,
+		"file_name": header.Filename,
 	})
 }
 
@@ -433,8 +452,8 @@ func (h *Handler) CreateCOSFilterTask(c *gin.Context) {
 		TIDs      []string `json:"tids" binding:"required"`
 		VINs      []string `json:"vins"`
 		PlateNos  []string `json:"plate_nos"`
-		StartTime string   `json:"start_time" binding:"required"`
-		EndTime   string   `json:"end_time" binding:"required"`
+		StartTime string   `json:"start_time"`
+		EndTime   string   `json:"end_time"`
 		COSFiles  []string `json:"cos_files" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -518,6 +537,200 @@ func (h *Handler) Health(c *gin.Context) {
 			"worker_count": cfg.WorkerCount,
 		},
 	})
+}
+
+// GetCSVFilterManager 返回 CSV 过滤器管理器
+func (h *Handler) GetCSVFilterManager() *services.CSVFilterTaskManager {
+	return h.csvFilterMgr
+}
+
+// ========== CSV 上传 & 过滤器 API ==========
+
+// UploadCSVFile 上传CSV文件到服务器 work_dir
+func (h *Handler) UploadCSVFile(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV文件: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	if header == nil || !strings.HasSuffix(strings.ToLower(header.Filename), ".csv") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV格式文件(.csv)"})
+		return
+	}
+
+	cfg := config.Get()
+	uploadDir := filepath.Join(cfg.WorkDir, "uploads")
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建上传目录失败: " + err.Error()})
+		return
+	}
+
+	saveName := fmt.Sprintf("%d_%s", time.Now().Unix(), header.Filename)
+	savePath := filepath.Join(uploadDir, saveName)
+
+	out, err := os.Create(savePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败: " + err.Error()})
+		return
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, file); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "写入文件失败: " + err.Error()})
+		return
+	}
+
+	log.Printf("[CSV上传] 已保存: %s (%d bytes)", savePath, header.Size)
+	c.JSON(http.StatusOK, gin.H{
+		"file_name": header.Filename,
+		"file_path": savePath,
+		"file_size": header.Size,
+	})
+}
+
+// ========== CSV 过滤器 API ==========
+
+// CSVFilterRequest CSV过滤请求
+type CSVFilterRequest struct {
+	TarPaths   []string `json:"tar_paths"`
+	TarPath    string   `json:"tar_path"`
+	COSFiles   []string `json:"cos_files"`
+	CSVPath    string   `json:"csv_path" binding:"required"`
+	OutputPath string   `json:"output_path"`
+	Restart    bool     `json:"restart"`
+}
+
+// StartCSVFilter 提交CSV过滤任务
+func (h *Handler) StartCSVFilter(c *gin.Context) {
+	var req CSVFilterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "解析请求失败: " + err.Error()})
+		return
+	}
+	if req.CSVPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "csv_path 不能为空"})
+		return
+	}
+
+	// 确定 tar 路径列表: 优先 cos_files(需下载), 其次 tar_paths, 最后 tar_path
+	tarPaths := req.TarPaths
+	if len(tarPaths) == 0 && req.TarPath != "" {
+		tarPaths = []string{req.TarPath}
+	}
+
+	// 如果有 COS 文件,先下载到本地
+	if len(req.COSFiles) > 0 {
+		cfg := config.Get()
+		downloadDir := filepath.Join(cfg.WorkDir, "downloads")
+		if err := os.MkdirAll(downloadDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "创建下载目录失败: " + err.Error()})
+			return
+		}
+		for _, cosKey := range req.COSFiles {
+			localName := filepath.Base(cosKey)
+			localPath := filepath.Join(downloadDir, localName)
+			if err := h.cosService.DownloadFile(cosKey, localPath); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "下载COS文件失败 " + cosKey + ": " + err.Error()})
+				return
+			}
+			log.Printf("[CSV过滤] COS下载完成: %s -> %s", cosKey, localPath)
+			tarPaths = append(tarPaths, localPath)
+		}
+	}
+
+	if len(tarPaths) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要一个 tar.gz 路径或 COS 文件"})
+		return
+	}
+
+	// 解析 CSV
+	segments, err := services.ReadCSV(req.CSVPath)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV 解析失败: " + err.Error()})
+		return
+	}
+
+	// 预检查所有 tar 是否存在
+	for _, p := range tarPaths {
+		if _, err := os.Stat(p); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "文件不存在: " + p + " (" + err.Error() + ")"})
+			return
+		}
+	}
+
+	groupCancel := make(chan struct{})
+
+	type submittedTask struct {
+		TarPath     string `json:"tar_path"`
+		TaskID      string `json:"task_id"`
+		ResumedFrom int64  `json:"resumed_from"`
+		Error       string `json:"error,omitempty"`
+	}
+	results := make([]submittedTask, 0, len(tarPaths))
+
+	type pendingTask struct {
+		t    *services.CSVFilterTask
+		prog *services.CSVProgressFile
+	}
+	queue := make([]pendingTask, 0, len(tarPaths))
+	for _, tarPath := range tarPaths {
+		outputPath := req.OutputPath
+		if outputPath == "" || len(tarPaths) > 1 {
+			outputPath = ""
+		}
+		var prog *services.CSVProgressFile
+		if !req.Restart {
+			if p, ok := services.LoadCSVProgress(tarPath, req.CSVPath, outputPath); ok {
+				prog = p
+			}
+		}
+		t, err := h.csvFilterMgr.Submit(tarPath, req.CSVPath, outputPath, req.Restart, groupCancel)
+		if err != nil {
+			results = append(results, submittedTask{TarPath: tarPath, Error: err.Error()})
+			continue
+		}
+		queue = append(queue, pendingTask{t: t, prog: prog})
+		rf := int64(0)
+		if prog != nil {
+			rf = prog.LinesDone
+		}
+		results = append(results, submittedTask{TarPath: tarPath, TaskID: t.ID, ResumedFrom: rf})
+	}
+
+	// 后台串行执行
+	go func() {
+		for _, pt := range queue {
+			select {
+			case <-groupCancel:
+				pt.t.SetStatus(services.CSVStatusFailed)
+				pt.t.SetError("组已取消")
+				continue
+			default:
+			}
+			h.csvFilterMgr.RunTask(pt.t, segments, pt.prog)
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"tasks": results})
+}
+
+// ListCSVFilterTasks 列出所有CSV过滤任务
+func (h *Handler) ListCSVFilterTasks(c *gin.Context) {
+	tasks := h.csvFilterMgr.List()
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+}
+
+// CancelCSVFilterTask 取消CSV过滤任务
+func (h *Handler) CancelCSVFilterTask(c *gin.Context) {
+	id := c.Query("id")
+	ok := h.csvFilterMgr.Cancel(id)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "cancel_requested"})
 }
 
 // QueryTIDHistory 查询TID绑定历史

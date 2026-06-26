@@ -8,12 +8,14 @@ import {
 import {
   ApiOutlined,
   LinkOutlined,
+  FilterOutlined,
 } from '@ant-design/icons';
 import VehicleQuery from './components/VehicleQuery';
 import ConfigPanel from './components/ConfigPanel';
 import FilterTask from './components/FilterTask';
 import TaskList from './components/TaskList';
 import BindLogQuery from './components/BindLogQuery';
+import CSVFilter from './components/CSVFilter';
 
 const { Header, Content } = Layout;
 const { Title } = Typography;
@@ -40,6 +42,11 @@ const App: React.FC = () => {
       key: 'filter',
       label: '⚙️ 过滤任务',
       children: <FilterTask />,
+    },
+    {
+      key: 'csv-filter',
+      label: <><FilterOutlined /> CSV过滤</>,
+      children: <CSVFilter />,
     },
     {
       key: 'tasks',
