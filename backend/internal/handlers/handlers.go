@@ -638,7 +638,7 @@ func setDLProgress(cosKey string, fn func(p *dlProgress)) {
 	fn(p)
 }
 
-// runCoscmdDownload 在后台运行 coscmd download，解析 stderr 输出进度
+// runCoscmdDownload 在后台运行 coscmd download，解析 stdout+stderr 输出进度
 func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 	setDLProgress(cosKey, func(p *dlProgress) {
 		p.Progress = 0
@@ -648,12 +648,15 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 	})
 
 	cmd := exec.Command("coscmd", "download", cosKey, localPath)
+	// coscmd 是 Python 工具,管道模式下会缓冲输出,设置环境变量强制无缓冲
+	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 
-	// 捕获 stderr（coscmd 的进度条输出到 stderr）
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
+	// 同时捕获 stdout 和 stderr（coscmd 进度可能输出到任一流）
+	stdout, err1 := cmd.StdoutPipe()
+	stderr, err2 := cmd.StderrPipe()
+	if err1 != nil || err2 != nil {
 		setDLProgress(cosKey, func(p *dlProgress) {
-			p.Error = "创建 stderr pipe 失败: " + err.Error()
+			p.Error = "创建 pipe 失败"
 			p.Done = true
 		})
 		return
@@ -667,22 +670,31 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 		return
 	}
 
-	// 逐行读取 stderr，解析进度
-	re := regexp.MustCompile(`(\d+)\s*%`)
-	scanner := bufio.NewScanner(stderr)
+	// 合并 stdout 和 stderr 一起读取
+	reader := io.MultiReader(stdout, stderr)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*64), 1024*64)
+
+	// 匹配多种进度格式:
+	//   100%  /  35.00%  /  [####] 35%  /  progress: 45%  /  45.5%
+	re := regexp.MustCompile(`(\d+)(?:\.\d+)?\s*%`)
 	for scanner.Scan() {
 		line := scanner.Text()
-		log.Printf("[COS下载 stderr] %s", line)
-		// 尝试从行中提取百分比
+		log.Printf("[COS下载 stdout/stderr] %s", line)
 		if m := re.FindStringSubmatch(line); len(m) > 1 {
 			pct := 0
 			fmt.Sscanf(m[1], "%d", &pct)
+			if pct < 0 {
+				pct = 0
+			}
 			if pct > 100 {
 				pct = 100
 			}
+			// 只在大幅变化时更新避免频繁加锁
 			setDLProgress(cosKey, func(p *dlProgress) {
-				p.Progress = pct
+				if pct > p.Progress || pct == 100 {
+					p.Progress = pct
+				}
 				p.Message = line
 			})
 		} else {
@@ -692,18 +704,17 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 		}
 	}
 
-	err = cmd.Wait()
+	err := cmd.Wait()
 	if err != nil {
+		log.Printf("[COS下载] coscmd 失败: %v，回退 SDK", err)
 		setDLProgress(cosKey, func(p *dlProgress) {
-			p.Error = fmt.Sprintf("coscmd download 失败: %v", err)
-			p.Done = true
-			p.Progress = 100
+			p.Message = "coscmd 失败,正在回退 SDK 方式..."
 		})
-		log.Printf("[COS下载] coscmd 失败: %v, 回退到 SDK 方式", err)
-		// 回退 SDK
 		if err2 := h.cosService.DownloadFile(cosKey, localPath); err2 != nil {
 			setDLProgress(cosKey, func(p *dlProgress) {
 				p.Error = "SDK 回退也失败: " + err2.Error()
+				p.Done = true
+				p.Progress = 100
 			})
 			return
 		}

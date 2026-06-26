@@ -188,13 +188,20 @@ const FilterTask: React.FC = () => {
           }
         }
 
+        // 立即显示初始进度
+        message.loading({
+          content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName} 0%`,
+          key: downloadMsgKey,
+          duration: 0,
+        });
+
         // 轮询下载进度，每5秒更新
         let lastPct = -1;
         for (;;) {
           await sleep(5000);
           const progResp = await getDownloadProgress(taskId);
           const { progress, message: progMsg, done, error, local_path } = progResp.data;
-          if (progress !== lastPct && progress > 0) {
+          if (progress !== lastPct) {
             message.loading({
               content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName} ${progress}%`,
               key: downloadMsgKey,
@@ -206,6 +213,11 @@ const FilterTask: React.FC = () => {
             if (error) {
               throw new Error(error);
             }
+            message.success({
+              content: `下载完成 [${i + 1}/${cosKeys.length}] ${fileName}`,
+              key: downloadMsgKey,
+              duration: 2,
+            });
             downloadedPaths.push(local_path);
             break;
           }
