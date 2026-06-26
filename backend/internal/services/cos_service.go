@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/tencentyun/cos-go-sdk-v5"
 
@@ -70,7 +69,7 @@ func (s *COSService) ensureClient() error {
 			SecretID:  cc.SecretID,
 			SecretKey: cc.SecretKey,
 		},
-		Timeout: 30 * time.Second,
+		Timeout: 0, // 不设超时，大文件下载可能耗时较长
 	})
 
 	return nil
