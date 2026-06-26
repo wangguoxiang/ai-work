@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -599,7 +600,7 @@ type DownloadCOSFileReq struct {
 	COSKey string `json:"cos_key" binding:"required"`
 }
 
-// DownloadCOSFile 下载单个COS文件到本地，返回本地路径
+// DownloadCOSFile 下载单个COS文件到本地（使用 coscmd download 命令），返回本地路径
 func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	var req DownloadCOSFileReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -608,6 +609,7 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	}
 
 	cfg := config.Get()
+	cc := cfg.COSConfig
 	downloadDir := filepath.Join(cfg.WorkDir, "downloads")
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建下载目录失败: " + err.Error()})
@@ -617,12 +619,32 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	localName := filepath.Base(req.COSKey)
 	localPath := filepath.Join(downloadDir, localName)
 
-	if err := h.cosService.DownloadFile(req.COSKey, localPath); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "下载COS文件失败: " + err.Error()})
-		return
+	// 使用 coscmd download 命令下载
+	// coscmd download -b <bucket> -r <region> <cos_path> <local_path>
+	args := []string{"download"}
+	if cc.Bucket != "" {
+		args = append(args, "-b", cc.Bucket)
+	}
+	if cc.Region != "" {
+		args = append(args, "-r", cc.Region)
+	}
+	args = append(args, req.COSKey, localPath)
+
+	cmd := exec.Command("coscmd", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errMsg := fmt.Sprintf("coscmd download 失败: %v\n输出: %s", err, string(output))
+		log.Printf("[COS下载] %s", errMsg)
+		// 如果 coscmd 失败,回退到 SDK 方式
+		if err2 := h.cosService.DownloadFile(req.COSKey, localPath); err2 != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg + "; SDK 回退也失败: " + err2.Error()})
+			return
+		}
+		log.Printf("[COS下载] coscmd 失败,SDK回退成功: %s -> %s", req.COSKey, localPath)
+	} else {
+		log.Printf("[COS下载] coscmd 完成: %s -> %s", req.COSKey, localPath)
 	}
 
-	log.Printf("[COS下载] 完成: %s -> %s", req.COSKey, localPath)
 	c.JSON(http.StatusOK, gin.H{
 		"cos_key":    req.COSKey,
 		"local_path": localPath,
