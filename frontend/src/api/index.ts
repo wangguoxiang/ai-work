@@ -32,6 +32,9 @@ export interface AppConfig {
   cos_config: COSConfig;
   work_dir: string;
   worker_count: number;
+  archive_dir?: string;
+  archive_file?: string;
+  output_dir?: string;
 }
 
 export interface VehicleInfo {
