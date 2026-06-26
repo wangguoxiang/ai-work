@@ -297,8 +297,10 @@ export const uploadCSVFile = (file: File) => {
   });
 };
 
-// COS文件下载(返回本地路径)
+// COS文件下载(返回本地路径)，大文件可能耗时较长，不设超时限制
 export const downloadCOSFile = (cosKey: string) =>
-  api.post<{ cos_key: string; local_path: string; file_name: string }>('/cos/download', { cos_key: cosKey });
+  api.post<{ cos_key: string; local_path: string; file_name: string }>('/cos/download', { cos_key: cosKey }, {
+    timeout: 0,
+  });
 
 export default api;
