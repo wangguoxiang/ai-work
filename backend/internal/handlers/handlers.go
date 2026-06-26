@@ -647,6 +647,8 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 		p.Done = false
 	})
 
+	runCmd := fmt.Sprintf("coscmd download %s %s", cosKey, localPath)
+	log.Printf("[COS下载] 执行命令: %s", runCmd)
 	cmd := exec.Command("coscmd", "download", cosKey, localPath)
 	// coscmd 是 Python 工具,管道模式下会缓冲输出,设置环境变量强制无缓冲
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
@@ -655,6 +657,7 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 	stdout, err1 := cmd.StdoutPipe()
 	stderr, err2 := cmd.StderrPipe()
 	if err1 != nil || err2 != nil {
+		log.Printf("[COS下载] 创建 pipe 失败: stdoutErr=%v stderrErr=%v", err1, err2)
 		setDLProgress(cosKey, func(p *dlProgress) {
 			p.Error = "创建 pipe 失败"
 			p.Done = true
@@ -663,12 +666,14 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		log.Printf("[COS下载] 启动命令失败: %v", err)
 		setDLProgress(cosKey, func(p *dlProgress) {
 			p.Error = "启动 coscmd download 失败: " + err.Error()
 			p.Done = true
 		})
 		return
 	}
+	log.Printf("[COS下载] 命令已启动, PID=%d", cmd.Process.Pid)
 
 	// 合并 stdout 和 stderr 一起读取
 	reader := io.MultiReader(stdout, stderr)
@@ -680,7 +685,7 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 	re := regexp.MustCompile(`(\d+)(?:\.\d+)?\s*%`)
 	for scanner.Scan() {
 		line := scanner.Text()
-		log.Printf("[COS下载 stdout/stderr] %s", line)
+		log.Printf("[COS下载 输出] %s", line)
 		if m := re.FindStringSubmatch(line); len(m) > 1 {
 			pct := 0
 			fmt.Sscanf(m[1], "%d", &pct)
@@ -703,8 +708,13 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 			})
 		}
 	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		log.Printf("[COS下载] 扫描输出出错: %v", scanErr)
+	}
 
 	err := cmd.Wait()
+	log.Printf("[COS下载] 命令退出, err=%v, exitCode=%d", err, cmd.ProcessState.ExitCode())
 	if err != nil {
 		log.Printf("[COS下载] coscmd 失败: %v，回退 SDK", err)
 		setDLProgress(cosKey, func(p *dlProgress) {
@@ -735,6 +745,7 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数无效: " + err.Error()})
 		return
 	}
+	log.Printf("[COS下载] 收到下载请求: cos_key=%s force=%v", req.COSKey, req.Force)
 
 	cfg := config.Get()
 	downloadDir := filepath.Join(cfg.WorkDir, "downloads")
