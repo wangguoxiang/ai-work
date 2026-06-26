@@ -609,7 +609,6 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	}
 
 	cfg := config.Get()
-	cc := cfg.COSConfig
 	downloadDir := filepath.Join(cfg.WorkDir, "downloads")
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建下载目录失败: " + err.Error()})
@@ -620,17 +619,10 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	localPath := filepath.Join(downloadDir, localName)
 
 	// 使用 coscmd download 命令下载
-	// coscmd download -b <bucket> -r <region> <cos_path> <local_path>
-	args := []string{"download"}
-	if cc.Bucket != "" {
-		args = append(args, "-b", cc.Bucket)
-	}
-	if cc.Region != "" {
-		args = append(args, "-r", cc.Region)
-	}
-	args = append(args, req.COSKey, localPath)
-
-	cmd := exec.Command("coscmd", args...)
+	// 注意: -b / -r 等参数仅用于 coscmd config, download 子命令不支持这些标志。
+	// 请确保已在服务器上执行过 coscmd config 配置好 bucket/region/密钥。
+	// 参考: coscmd config -a <SecretId> -s <SecretKey> -b <BucketName> -r <Region>
+	cmd := exec.Command("coscmd", "download", req.COSKey, localPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		errMsg := fmt.Sprintf("coscmd download 失败: %v\n输出: %s", err, string(output))
