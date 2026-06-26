@@ -139,6 +139,35 @@ func (s *COSService) ListFiles(prefix string) ([]COSFileInfo, error) {
 
 // DownloadFile 从COS下载文件到本地
 func (s *COSService) DownloadFile(key, localPath string) error {
+	return s.DownloadFileWithProgress(key, localPath, nil)
+}
+
+// ProgressCallback 下载进度回调(downloadedBytes, totalBytes)
+type ProgressCallback func(downloaded, total int64)
+
+// progressReader 包装 io.Reader，每次 Read 后回调进度
+type progressReader struct {
+	reader     io.Reader
+	total      int64
+	downloaded int64
+	callback   ProgressCallback
+	lastPct    int // 上次回调时的百分比，避免过于频繁
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.reader.Read(p)
+	pr.downloaded += int64(n)
+	// 每变化至少 2% 才回调用，减少锁竞争
+	pct := int(pr.downloaded * 100 / pr.total)
+	if pct != pr.lastPct && pr.callback != nil {
+		pr.callback(pr.downloaded, pr.total)
+		pr.lastPct = pct
+	}
+	return n, err
+}
+
+// DownloadFileWithProgress 从COS下载文件到本地，通过回调报告进度
+func (s *COSService) DownloadFileWithProgress(key, localPath string, progressFn ProgressCallback) error {
 	if err := s.ensureClient(); err != nil {
 		return err
 	}
@@ -149,11 +178,17 @@ func (s *COSService) DownloadFile(key, localPath string) error {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
 
+	// 先 HEAD 获取文件大小
 	resp, err := s.client.Object.Get(context.Background(), key, nil)
 	if err != nil {
 		return fmt.Errorf("下载COS文件失败: %w", err)
 	}
 	defer resp.Body.Close()
+
+	contentLength := resp.ContentLength
+	if contentLength <= 0 {
+		contentLength = 1 // 防除零
+	}
 
 	out, err := os.Create(localPath)
 	if err != nil {
@@ -161,7 +196,16 @@ func (s *COSService) DownloadFile(key, localPath string) error {
 	}
 	defer out.Close()
 
-	written, err := io.Copy(out, resp.Body)
+	var reader io.Reader = resp.Body
+	if progressFn != nil {
+		reader = &progressReader{
+			reader:   resp.Body,
+			total:    contentLength,
+			callback: progressFn,
+		}
+	}
+
+	written, err := io.Copy(out, reader)
 	if err != nil {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}

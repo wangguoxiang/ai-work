@@ -47,6 +47,17 @@ interface TIDEntry {
   plate_no: string;
 }
 
+// DownloadTask 单个文件下载任务
+interface DownloadTask {
+  cos_key: string;
+  file_name: string;
+  progress: number;
+  message: string;
+  done: boolean;
+  error: string;
+  local_path: string;
+}
+
 const FilterTask: React.FC = () => {
   // TID列表 + CSV文件路径(用于后续CSV过滤)
   const [tidEntries, setTidEntries] = useState<TIDEntry[]>([]);
@@ -60,7 +71,11 @@ const FilterTask: React.FC = () => {
   const [selectedCOSFiles, setSelectedCOSFiles] = useState<Set<string>>(new Set());
   const [cosLoading, setCosLoading] = useState(false);
 
-  // 任务
+  // 下载任务列表（表格展示）
+  const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
+  const [allDownloaded, setAllDownloaded] = useState(false);
+
+  // CSV过滤任务
   const [taskLoading, setTaskLoading] = useState(false);
   const [csvTasks, setCsvTasks] = useState<CSVFilterTask[]>([]);
   const [workerCount, setWorkerCount] = useState(4);
@@ -152,35 +167,51 @@ const FilterTask: React.FC = () => {
 
     const cosKeys = Array.from(selectedCOSFiles);
     setTaskLoading(true);
+    setAllDownloaded(false);
 
-    // 步骤1: 逐个下载COS文件到服务器本地目录，显示下载进度
-    const downloadedPaths: string[] = [];
-    const downloadMsgKey = 'download_msg';
-    message.loading({ content: `准备下载 ${cosKeys.length} 个COS文件...`, key: downloadMsgKey, duration: 0 });
+    // 初始化下载任务列表
+    const initTasks: DownloadTask[] = cosKeys.map(key => ({
+      cos_key: key,
+      file_name: key.split('/').pop() || key,
+      progress: 0,
+      message: '排队中',
+      done: false,
+      error: '',
+      local_path: '',
+    }));
+    setDownloadTasks(initTasks);
 
-    // 辅助函数：休眠
     const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const downloadedPaths: string[] = [];
 
     try {
       for (let i = 0; i < cosKeys.length; i++) {
-        const fileName = cosKeys[i].split('/').pop() || cosKeys[i];
-
-        // 先尝试启动下载（不强制覆盖）
+        const cosKey = cosKeys[i];
         let taskId: string;
+
+        // 标记当前文件开始下载
+        setDownloadTasks(prev => prev.map((t, idx) =>
+          idx === i ? { ...t, message: '启动中...' } : t
+        ));
+
+        // 启动下载（不强制覆盖）
         try {
-          const startResp = await downloadCOSFile(cosKeys[i], false);
+          const startResp = await downloadCOSFile(cosKey, false);
           taskId = startResp.data.task_id;
         } catch (firstErr: any) {
           if (firstErr.response?.status === 409) {
             const doOverwrite = window.confirm(
-              `服务器上已存在文件 ${fileName}，是否覆盖重新下载？\n\n点击"确定"覆盖，点击"取消"跳过此文件。`
+              `服务器上已存在文件 ${initTasks[i].file_name}，是否覆盖重新下载？`
             );
             if (doOverwrite) {
-              const startResp = await downloadCOSFile(cosKeys[i], true);
+              const startResp = await downloadCOSFile(cosKey, true);
               taskId = startResp.data.task_id;
             } else {
               const existingPath = firstErr.response.data.local_path;
               downloadedPaths.push(existingPath);
+              setDownloadTasks(prev => prev.map((t, idx) =>
+                idx === i ? { ...t, progress: 100, message: '跳过(已存在)', done: true, local_path: existingPath } : t
+              ));
               continue;
             }
           } else {
@@ -188,45 +219,31 @@ const FilterTask: React.FC = () => {
           }
         }
 
-        // 立即显示初始进度
-        message.loading({
-          content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName} 0%`,
-          key: downloadMsgKey,
-          duration: 0,
-        });
-
-        // 轮询下载进度，每5秒更新
-        let lastPct = -1;
+        // 轮询下载进度，每3秒更新表格
         for (;;) {
-          await sleep(5000);
+          await sleep(3000);
           const progResp = await getDownloadProgress(taskId);
           const { progress, message: progMsg, done, error, local_path } = progResp.data;
-          if (progress !== lastPct) {
-            message.loading({
-              content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName} ${progress}%`,
-              key: downloadMsgKey,
-              duration: 0,
-            });
-            lastPct = progress;
-          }
+          setDownloadTasks(prev => prev.map((t, idx) =>
+            idx === i ? { ...t, progress, message: progMsg || `${progress}%`, local_path } : t
+          ));
           if (done) {
             if (error) {
+              setDownloadTasks(prev => prev.map((t, idx) =>
+                idx === i ? { ...t, error, done: true } : t
+              ));
               throw new Error(error);
             }
-            message.success({
-              content: `下载完成 [${i + 1}/${cosKeys.length}] ${fileName}`,
-              key: downloadMsgKey,
-              duration: 2,
-            });
             downloadedPaths.push(local_path);
             break;
           }
         }
       }
 
-      message.success({ content: `全部 ${cosKeys.length} 个COS文件下载完成`, key: downloadMsgKey, duration: 2 });
+      setAllDownloaded(true);
+      message.success(`全部 ${cosKeys.length} 个COS文件下载完成`);
 
-      // 步骤2: 用下载好的本地路径提交CSV过滤任务
+      // 步骤2: 提交CSV过滤任务
       message.loading({ content: '正在提交CSV过滤任务...', key: 'filter_msg', duration: 0 });
       await submitCSVFilter({
         tar_paths: downloadedPaths,
@@ -366,6 +383,30 @@ const FilterTask: React.FC = () => {
         </Col>
 
         <Col xs={24} lg={10}>
+          {/* 下载进度列表 */}
+          {downloadTasks.length > 0 && (
+            <Card title={<span>下载进度</span>} style={{ marginBottom: 16 }}>
+              <Table dataSource={downloadTasks} rowKey="cos_key" size="small" pagination={false}
+                columns={[
+                  { title: '文件', dataIndex: 'file_name', key: 'file_name', ellipsis: true,
+                    render: (v: string) => <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</Text> },
+                  { title: '进度', dataIndex: 'progress', key: 'progress', width: 140,
+                    render: (p: number, r: DownloadTask) => (
+                      <Progress percent={r.done && !r.error ? 100 : p} size="small"
+                        status={r.error ? 'exception' : undefined} style={{ margin: 0 }} />
+                    ),
+                  },
+                  { title: '状态', dataIndex: 'message', key: 'message', width: 160, ellipsis: true,
+                    render: (msg: string, r: DownloadTask) =>
+                      r.error ? <Tag color="error">失败</Tag>
+                      : r.done ? <Tag color="success">完成</Tag>
+                      : r.progress > 0 ? <Tag color="processing">{r.progress}%</Tag>
+                      : <Tag>{msg}</Tag>,
+                  },
+                ]} />
+            </Card>
+          )}
+
           {/* 并行配置 */}
           <Card title={<span>并行配置</span>} style={{ marginBottom: 16 }}>
             <div style={{ marginBottom: 4 }}>

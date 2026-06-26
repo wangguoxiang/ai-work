@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bufio"
 	"context"
 	"encoding/csv"
 	"fmt"
@@ -9,9 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -638,96 +635,38 @@ func setDLProgress(cosKey string, fn func(p *dlProgress)) {
 	fn(p)
 }
 
-// runCoscmdDownload 在后台运行 coscmd download，解析 stdout+stderr 输出进度
-func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
+// runSDKDownload 用 Go SDK 下载，通过 progressReader 实时更新进度
+func (h *Handler) runSDKDownload(cosKey, localPath string) {
 	setDLProgress(cosKey, func(p *dlProgress) {
 		p.Progress = 0
-		p.Message = "正在启动 coscmd download..."
+		p.Message = "开始下载..."
 		p.Error = ""
 		p.Done = false
 	})
 
-	runCmd := fmt.Sprintf("coscmd download %s %s", cosKey, localPath)
-	log.Printf("[COS下载] 执行命令: %s", runCmd)
-	cmd := exec.Command("coscmd", "download", cosKey, localPath)
-	// coscmd 是 Python 工具,管道模式下会缓冲输出,设置环境变量强制无缓冲
-	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
-
-	// 同时捕获 stdout 和 stderr（coscmd 进度可能输出到任一流）
-	stdout, err1 := cmd.StdoutPipe()
-	stderr, err2 := cmd.StderrPipe()
-	if err1 != nil || err2 != nil {
-		log.Printf("[COS下载] 创建 pipe 失败: stdoutErr=%v stderrErr=%v", err1, err2)
-		setDLProgress(cosKey, func(p *dlProgress) {
-			p.Error = "创建 pipe 失败"
-			p.Done = true
-		})
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("[COS下载] 启动命令失败: %v", err)
-		setDLProgress(cosKey, func(p *dlProgress) {
-			p.Error = "启动 coscmd download 失败: " + err.Error()
-			p.Done = true
-		})
-		return
-	}
-	log.Printf("[COS下载] 命令已启动, PID=%d", cmd.Process.Pid)
-
-	// 合并 stdout 和 stderr 一起读取
-	reader := io.MultiReader(stdout, stderr)
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*64), 1024*64)
-
-	// 匹配多种进度格式:
-	//   100%  /  35.00%  /  [####] 35%  /  progress: 45%  /  45.5%
-	re := regexp.MustCompile(`(\d+)(?:\.\d+)?\s*%`)
-	for scanner.Scan() {
-		line := scanner.Text()
-		log.Printf("[COS下载 输出] %s", line)
-		if m := re.FindStringSubmatch(line); len(m) > 1 {
-			pct := 0
-			fmt.Sscanf(m[1], "%d", &pct)
-			if pct < 0 {
-				pct = 0
-			}
-			if pct > 100 {
-				pct = 100
-			}
-			// 只在大幅变化时更新避免频繁加锁
-			setDLProgress(cosKey, func(p *dlProgress) {
-				if pct > p.Progress || pct == 100 {
-					p.Progress = pct
-				}
-				p.Message = line
-			})
-		} else {
-			setDLProgress(cosKey, func(p *dlProgress) {
-				p.Message = line
-			})
+	log.Printf("[COS下载] SDK下载开始: %s -> %s", cosKey, localPath)
+	err := h.cosService.DownloadFileWithProgress(cosKey, localPath, func(downloaded, total int64) {
+		pct := int(downloaded * 100 / total)
+		if pct < 0 {
+			pct = 0
 		}
-	}
-	scanErr := scanner.Err()
-	if scanErr != nil {
-		log.Printf("[COS下载] 扫描输出出错: %v", scanErr)
-	}
+		if pct > 100 {
+			pct = 100
+		}
+		setDLProgress(cosKey, func(p *dlProgress) {
+			p.Progress = pct
+			p.Message = fmt.Sprintf("已下载 %d / %d MB (%d%%)", downloaded/1048576, total/1048576, pct)
+		})
+	})
 
-	err := cmd.Wait()
-	log.Printf("[COS下载] 命令退出, err=%v, exitCode=%d", err, cmd.ProcessState.ExitCode())
 	if err != nil {
-		log.Printf("[COS下载] coscmd 失败: %v，回退 SDK", err)
+		log.Printf("[COS下载] SDK下载失败: %v", err)
 		setDLProgress(cosKey, func(p *dlProgress) {
-			p.Message = "coscmd 失败,正在回退 SDK 方式..."
+			p.Error = "下载失败: " + err.Error()
+			p.Done = true
+			p.Progress = 100
 		})
-		if err2 := h.cosService.DownloadFile(cosKey, localPath); err2 != nil {
-			setDLProgress(cosKey, func(p *dlProgress) {
-				p.Error = "SDK 回退也失败: " + err2.Error()
-				p.Done = true
-				p.Progress = 100
-			})
-			return
-		}
+		return
 	}
 
 	setDLProgress(cosKey, func(p *dlProgress) {
@@ -735,7 +674,7 @@ func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
 		p.Message = "下载完成"
 		p.Done = true
 	})
-	log.Printf("[COS下载] 完成: %s -> %s", cosKey, localPath)
+	log.Printf("[COS下载] SDK下载完成: %s", localPath)
 }
 
 // DownloadCOSFile 启动异步下载，返回 task_id（即 cos_key）用于轮询进度
@@ -788,7 +727,7 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	})
 
 	// 异步启动下载
-	go h.runCoscmdDownload(req.COSKey, localPath)
+	go h.runSDKDownload(req.COSKey, localPath)
 
 	// 立即返回 task_id（即 cos_key），前端用它轮询进度
 	c.JSON(http.StatusOK, gin.H{
