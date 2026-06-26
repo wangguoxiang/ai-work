@@ -165,7 +165,29 @@ const FilterTask: React.FC = () => {
           key: downloadMsgKey,
           duration: 0,
         });
-        const resp = await downloadCOSFile(cosKeys[i]);
+
+        // 先尝试下载（不强制覆盖）
+        let resp;
+        try {
+          resp = await downloadCOSFile(cosKeys[i], false);
+        } catch (firstErr: any) {
+          // 检查是否因为文件已存在(HTTP 409)
+          if (firstErr.response?.status === 409) {
+            const doOverwrite = window.confirm(
+              `服务器上已存在文件 ${fileName}，是否覆盖重新下载？\n\n点击"确定"覆盖，点击"取消"跳过此文件。`
+            );
+            if (doOverwrite) {
+              resp = await downloadCOSFile(cosKeys[i], true);
+            } else {
+              // 跳过：使用已存在的文件路径
+              const existingPath = firstErr.response.data.local_path;
+              downloadedPaths.push(existingPath);
+              continue;
+            }
+          } else {
+            throw firstErr;
+          }
+        }
         downloadedPaths.push(resp.data.local_path);
       }
 

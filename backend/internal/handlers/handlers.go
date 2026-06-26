@@ -598,6 +598,7 @@ func (h *Handler) UploadCSVFile(c *gin.Context) {
 // DownloadCOSFileReq 下载请求
 type DownloadCOSFileReq struct {
 	COSKey string `json:"cos_key" binding:"required"`
+	Force  bool   `json:"force"`
 }
 
 // DownloadCOSFile 下载单个COS文件到本地（使用 coscmd download 命令），返回本地路径
@@ -617,6 +618,27 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 
 	localName := filepath.Base(req.COSKey)
 	localPath := filepath.Join(downloadDir, localName)
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(localPath); err == nil {
+		if !req.Force {
+			// 文件已存在且未要求强制覆盖，告知前端让用户选择
+			c.JSON(http.StatusConflict, gin.H{
+				"exists":     true,
+				"local_path": localPath,
+				"file_name":  localName,
+				"cos_key":    req.COSKey,
+				"message":    fmt.Sprintf("文件 %s 已存在，是否覆盖？", localName),
+			})
+			return
+		}
+		// 强制覆盖：删除旧文件
+		log.Printf("[COS下载] 文件已存在，强制覆盖: %s", localPath)
+		if err := os.Remove(localPath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "删除旧文件失败: " + err.Error()})
+			return
+		}
+	}
 
 	// 使用 coscmd download 命令下载
 	// 注意: -b / -r 等参数仅用于 coscmd config, download 子命令不支持这些标志。
