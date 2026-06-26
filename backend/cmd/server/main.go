@@ -101,8 +101,9 @@ func main() {
 		// 导入绑定流水CSV文件，按时间范围过滤TID
 		api.POST("/filter/import-csv", h.ImportCSV)
 
-		// COS文件下载(返回本地路径用于CSV过滤)
+		// COS文件下载(异步,返回task_id用于轮询进度)
 		api.POST("/cos/download", h.DownloadCOSFile)
+		api.GET("/cos/download-progress", h.GetDownloadProgress)
 
 		// CSV过滤任务(直接从gzip SQL文件按CSV绑定段过滤)
 		api.POST("/filter/csv-upload", h.UploadCSVFile)

@@ -33,6 +33,7 @@ import {
   submitCSVFilter,
   listCSVFilterTasks,
   downloadCOSFile,
+  getDownloadProgress,
   TIDImportItem,
   COSFileInfo,
   CSVFilterTask,
@@ -157,29 +158,27 @@ const FilterTask: React.FC = () => {
     const downloadMsgKey = 'download_msg';
     message.loading({ content: `准备下载 ${cosKeys.length} 个COS文件...`, key: downloadMsgKey, duration: 0 });
 
+    // 辅助函数：休眠
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
     try {
       for (let i = 0; i < cosKeys.length; i++) {
         const fileName = cosKeys[i].split('/').pop() || cosKeys[i];
-        message.loading({
-          content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName}...`,
-          key: downloadMsgKey,
-          duration: 0,
-        });
 
-        // 先尝试下载（不强制覆盖）
-        let resp;
+        // 先尝试启动下载（不强制覆盖）
+        let taskId: string;
         try {
-          resp = await downloadCOSFile(cosKeys[i], false);
+          const startResp = await downloadCOSFile(cosKeys[i], false);
+          taskId = startResp.data.task_id;
         } catch (firstErr: any) {
-          // 检查是否因为文件已存在(HTTP 409)
           if (firstErr.response?.status === 409) {
             const doOverwrite = window.confirm(
               `服务器上已存在文件 ${fileName}，是否覆盖重新下载？\n\n点击"确定"覆盖，点击"取消"跳过此文件。`
             );
             if (doOverwrite) {
-              resp = await downloadCOSFile(cosKeys[i], true);
+              const startResp = await downloadCOSFile(cosKeys[i], true);
+              taskId = startResp.data.task_id;
             } else {
-              // 跳过：使用已存在的文件路径
               const existingPath = firstErr.response.data.local_path;
               downloadedPaths.push(existingPath);
               continue;
@@ -188,7 +187,29 @@ const FilterTask: React.FC = () => {
             throw firstErr;
           }
         }
-        downloadedPaths.push(resp.data.local_path);
+
+        // 轮询下载进度，每5秒更新
+        let lastPct = -1;
+        for (;;) {
+          await sleep(5000);
+          const progResp = await getDownloadProgress(taskId);
+          const { progress, message: progMsg, done, error, local_path } = progResp.data;
+          if (progress !== lastPct && progress > 0) {
+            message.loading({
+              content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName} ${progress}%`,
+              key: downloadMsgKey,
+              duration: 0,
+            });
+            lastPct = progress;
+          }
+          if (done) {
+            if (error) {
+              throw new Error(error);
+            }
+            downloadedPaths.push(local_path);
+            break;
+          }
+        }
       }
 
       message.success({ content: `全部 ${cosKeys.length} 个COS文件下载完成`, key: downloadMsgKey, duration: 2 });

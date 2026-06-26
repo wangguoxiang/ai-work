@@ -297,14 +297,20 @@ export const uploadCSVFile = (file: File) => {
   });
 };
 
-// COS文件下载(返回本地路径)，大文件可能耗时较长，不设超时限制
+// COS文件下载(异步，返回task_id用于轮询进度)
 // force=true 时强制覆盖已存在的本地文件
 export const downloadCOSFile = (cosKey: string, force?: boolean) =>
-  api.post<{ cos_key: string; local_path: string; file_name: string }>('/cos/download', {
+  api.post<{ task_id: string; cos_key: string; local_path: string; file_name: string }>('/cos/download', {
     cos_key: cosKey,
     force: force || false,
   }, {
-    timeout: 0,
+    timeout: 30000,
+  });
+
+// 查询下载进度(前端每5秒轮询)
+export const getDownloadProgress = (taskId: string) =>
+  api.get<{ task_id: string; progress: number; message: string; local_path: string; file_name: string; error: string; done: boolean }>('/cos/download-progress', {
+    params: { task_id: taskId },
   });
 
 export default api;

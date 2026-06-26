@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"encoding/csv"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -593,7 +596,7 @@ func (h *Handler) UploadCSVFile(c *gin.Context) {
 
 // ========== CSV 过滤器 API ==========
 
-// ========== COS 文件下载 API ==========
+// ========== COS 文件下载 API（异步+进度轮询） ==========
 
 // DownloadCOSFileReq 下载请求
 type DownloadCOSFileReq struct {
@@ -601,7 +604,120 @@ type DownloadCOSFileReq struct {
 	Force  bool   `json:"force"`
 }
 
-// DownloadCOSFile 下载单个COS文件到本地（使用 coscmd download 命令），返回本地路径
+// dlProgress 单个下载任务的进度
+type dlProgress struct {
+	mu        sync.Mutex
+	Progress  int    `json:"progress"` // 0-100
+	Message   string `json:"message"`  // 当前状态描述
+	LocalPath string `json:"local_path"`
+	FileName  string `json:"file_name"`
+	Error     string `json:"error,omitempty"`
+	Done      bool   `json:"done"`
+}
+
+var (
+	dlProgressMu sync.Mutex
+	dlProgresses = map[string]*dlProgress{} // key = cos_key
+)
+
+func getDLProgress(cosKey string) *dlProgress {
+	dlProgressMu.Lock()
+	defer dlProgressMu.Unlock()
+	p, ok := dlProgresses[cosKey]
+	if !ok {
+		p = &dlProgress{Progress: 0, Message: "初始化"}
+		dlProgresses[cosKey] = p
+	}
+	return p
+}
+
+func setDLProgress(cosKey string, fn func(p *dlProgress)) {
+	p := getDLProgress(cosKey)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fn(p)
+}
+
+// runCoscmdDownload 在后台运行 coscmd download，解析 stderr 输出进度
+func (h *Handler) runCoscmdDownload(cosKey, localPath string) {
+	setDLProgress(cosKey, func(p *dlProgress) {
+		p.Progress = 0
+		p.Message = "正在启动 coscmd download..."
+		p.Error = ""
+		p.Done = false
+	})
+
+	cmd := exec.Command("coscmd", "download", cosKey, localPath)
+
+	// 捕获 stderr（coscmd 的进度条输出到 stderr）
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		setDLProgress(cosKey, func(p *dlProgress) {
+			p.Error = "创建 stderr pipe 失败: " + err.Error()
+			p.Done = true
+		})
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		setDLProgress(cosKey, func(p *dlProgress) {
+			p.Error = "启动 coscmd download 失败: " + err.Error()
+			p.Done = true
+		})
+		return
+	}
+
+	// 逐行读取 stderr，解析进度
+	re := regexp.MustCompile(`(\d+)\s*%`)
+	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 1024*64), 1024*64)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Printf("[COS下载 stderr] %s", line)
+		// 尝试从行中提取百分比
+		if m := re.FindStringSubmatch(line); len(m) > 1 {
+			pct := 0
+			fmt.Sscanf(m[1], "%d", &pct)
+			if pct > 100 {
+				pct = 100
+			}
+			setDLProgress(cosKey, func(p *dlProgress) {
+				p.Progress = pct
+				p.Message = line
+			})
+		} else {
+			setDLProgress(cosKey, func(p *dlProgress) {
+				p.Message = line
+			})
+		}
+	}
+
+	err = cmd.Wait()
+	if err != nil {
+		setDLProgress(cosKey, func(p *dlProgress) {
+			p.Error = fmt.Sprintf("coscmd download 失败: %v", err)
+			p.Done = true
+			p.Progress = 100
+		})
+		log.Printf("[COS下载] coscmd 失败: %v, 回退到 SDK 方式", err)
+		// 回退 SDK
+		if err2 := h.cosService.DownloadFile(cosKey, localPath); err2 != nil {
+			setDLProgress(cosKey, func(p *dlProgress) {
+				p.Error = "SDK 回退也失败: " + err2.Error()
+			})
+			return
+		}
+	}
+
+	setDLProgress(cosKey, func(p *dlProgress) {
+		p.Progress = 100
+		p.Message = "下载完成"
+		p.Done = true
+	})
+	log.Printf("[COS下载] 完成: %s -> %s", cosKey, localPath)
+}
+
+// DownloadCOSFile 启动异步下载，返回 task_id（即 cos_key）用于轮询进度
 func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	var req DownloadCOSFileReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -622,7 +738,6 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 	// 检查文件是否已存在
 	if _, err := os.Stat(localPath); err == nil {
 		if !req.Force {
-			// 文件已存在且未要求强制覆盖，告知前端让用户选择
 			c.JSON(http.StatusConflict, gin.H{
 				"exists":     true,
 				"local_path": localPath,
@@ -632,7 +747,6 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 			})
 			return
 		}
-		// 强制覆盖：删除旧文件
 		log.Printf("[COS下载] 文件已存在，强制覆盖: %s", localPath)
 		if err := os.Remove(localPath); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "删除旧文件失败: " + err.Error()})
@@ -640,29 +754,47 @@ func (h *Handler) DownloadCOSFile(c *gin.Context) {
 		}
 	}
 
-	// 使用 coscmd download 命令下载
-	// 注意: -b / -r 等参数仅用于 coscmd config, download 子命令不支持这些标志。
-	// 请确保已在服务器上执行过 coscmd config 配置好 bucket/region/密钥。
-	// 参考: coscmd config -a <SecretId> -s <SecretKey> -b <BucketName> -r <Region>
-	cmd := exec.Command("coscmd", "download", req.COSKey, localPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		errMsg := fmt.Sprintf("coscmd download 失败: %v\n输出: %s", err, string(output))
-		log.Printf("[COS下载] %s", errMsg)
-		// 如果 coscmd 失败,回退到 SDK 方式
-		if err2 := h.cosService.DownloadFile(req.COSKey, localPath); err2 != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg + "; SDK 回退也失败: " + err2.Error()})
-			return
-		}
-		log.Printf("[COS下载] coscmd 失败,SDK回退成功: %s -> %s", req.COSKey, localPath)
-	} else {
-		log.Printf("[COS下载] coscmd 完成: %s -> %s", req.COSKey, localPath)
-	}
+	// 初始化进度记录
+	getDLProgress(req.COSKey)
+	setDLProgress(req.COSKey, func(p *dlProgress) {
+		p.Progress = 0
+		p.Message = "排队中..."
+		p.LocalPath = localPath
+		p.FileName = localName
+		p.Done = false
+		p.Error = ""
+	})
 
+	// 异步启动下载
+	go h.runCoscmdDownload(req.COSKey, localPath)
+
+	// 立即返回 task_id（即 cos_key），前端用它轮询进度
 	c.JSON(http.StatusOK, gin.H{
+		"task_id":    req.COSKey,
 		"cos_key":    req.COSKey,
 		"local_path": localPath,
 		"file_name":  localName,
+	})
+}
+
+// GetDownloadProgress 查询下载进度（供前端轮询，每5秒）
+func (h *Handler) GetDownloadProgress(c *gin.Context) {
+	taskID := c.Query("task_id")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 不能为空"})
+		return
+	}
+	p := getDLProgress(taskID)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{
+		"task_id":    taskID,
+		"progress":   p.Progress,
+		"message":    p.Message,
+		"local_path": p.LocalPath,
+		"file_name":  p.FileName,
+		"error":      p.Error,
+		"done":       p.Done,
 	})
 }
 
