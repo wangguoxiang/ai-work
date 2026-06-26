@@ -32,6 +32,7 @@ import {
   listCOSFiles,
   submitCSVFilter,
   listCSVFilterTasks,
+  downloadCOSFile,
   TIDImportItem,
   COSFileInfo,
   CSVFilterTask,
@@ -81,7 +82,7 @@ const FilterTask: React.FC = () => {
   const loadCSVFilterTasks = async () => {
     try {
       const resp = await listCSVFilterTasks();
-      setCsvTasks(resp.data.tasks);
+      setCsvTasks(resp.data.tasks || []);
     } catch (_) {}
   };
 
@@ -89,7 +90,7 @@ const FilterTask: React.FC = () => {
     setCosLoading(true);
     try {
       const resp = await listCOSFiles();
-      setCosFiles(resp.data.files);
+      setCosFiles(resp.data.files || []);
     } catch (err: any) {
       message.error('加载COS文件失败: ' + (err.response?.data?.error || err.message));
     } finally {
@@ -148,17 +149,40 @@ const FilterTask: React.FC = () => {
     if (selectedCOSFiles.size === 0) { message.warning('请选择COS文件'); return; }
     if (!csvFilePath) { message.warning('请先导入CSV文件'); return; }
 
+    const cosKeys = Array.from(selectedCOSFiles);
     setTaskLoading(true);
+
+    // 步骤1: 逐个下载COS文件到服务器本地目录，显示下载进度
+    const downloadedPaths: string[] = [];
+    const downloadMsgKey = 'download_msg';
+    message.loading({ content: `准备下载 ${cosKeys.length} 个COS文件...`, key: downloadMsgKey, duration: 0 });
+
     try {
-      // 使用CSV过滤: 从COS下载文件 → 按CSV绑定段过滤SQL → 输出SQL文件
+      for (let i = 0; i < cosKeys.length; i++) {
+        const fileName = cosKeys[i].split('/').pop() || cosKeys[i];
+        message.loading({
+          content: `正在下载 [${i + 1}/${cosKeys.length}] ${fileName}...`,
+          key: downloadMsgKey,
+          duration: 0,
+        });
+        const resp = await downloadCOSFile(cosKeys[i]);
+        downloadedPaths.push(resp.data.local_path);
+      }
+
+      message.success({ content: `全部 ${cosKeys.length} 个COS文件下载完成`, key: downloadMsgKey, duration: 2 });
+
+      // 步骤2: 用下载好的本地路径提交CSV过滤任务
+      message.loading({ content: '正在提交CSV过滤任务...', key: 'filter_msg', duration: 0 });
       await submitCSVFilter({
-        cos_files: Array.from(selectedCOSFiles),
+        tar_paths: downloadedPaths,
         csv_path: csvFilePath,
       });
-      message.success('CSV过滤任务已创建,COS文件将自动下载并过滤');
+      message.success({ content: 'CSV过滤任务已创建，正在后台执行', key: 'filter_msg', duration: 3 });
       loadCSVFilterTasks();
     } catch (err: any) {
-      message.error('创建任务失败: ' + (err.response?.data?.error || err.message));
+      const detail = err.response?.data?.error || err.message;
+      message.destroy();
+      message.error('操作失败: ' + detail);
     } finally {
       setTaskLoading(false);
     }

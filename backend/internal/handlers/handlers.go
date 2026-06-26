@@ -592,17 +592,56 @@ func (h *Handler) UploadCSVFile(c *gin.Context) {
 
 // ========== CSV 过滤器 API ==========
 
+// ========== COS 文件下载 API ==========
+
+// DownloadCOSFileReq 下载请求
+type DownloadCOSFileReq struct {
+	COSKey string `json:"cos_key" binding:"required"`
+}
+
+// DownloadCOSFile 下载单个COS文件到本地，返回本地路径
+func (h *Handler) DownloadCOSFile(c *gin.Context) {
+	var req DownloadCOSFileReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数无效: " + err.Error()})
+		return
+	}
+
+	cfg := config.Get()
+	downloadDir := filepath.Join(cfg.WorkDir, "downloads")
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建下载目录失败: " + err.Error()})
+		return
+	}
+
+	localName := filepath.Base(req.COSKey)
+	localPath := filepath.Join(downloadDir, localName)
+
+	if err := h.cosService.DownloadFile(req.COSKey, localPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "下载COS文件失败: " + err.Error()})
+		return
+	}
+
+	log.Printf("[COS下载] 完成: %s -> %s", req.COSKey, localPath)
+	c.JSON(http.StatusOK, gin.H{
+		"cos_key":    req.COSKey,
+		"local_path": localPath,
+		"file_name":  localName,
+	})
+}
+
+// ========== CSV 过滤器 API ==========
+
 // CSVFilterRequest CSV过滤请求
 type CSVFilterRequest struct {
 	TarPaths   []string `json:"tar_paths"`
 	TarPath    string   `json:"tar_path"`
-	COSFiles   []string `json:"cos_files"`
 	CSVPath    string   `json:"csv_path" binding:"required"`
 	OutputPath string   `json:"output_path"`
 	Restart    bool     `json:"restart"`
 }
 
-// StartCSVFilter 提交CSV过滤任务
+// StartCSVFilter 提交CSV过滤任务（tar_paths 需为已下载到本地的文件路径）
 func (h *Handler) StartCSVFilter(c *gin.Context) {
 	var req CSVFilterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -614,34 +653,12 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 		return
 	}
 
-	// 确定 tar 路径列表: 优先 cos_files(需下载), 其次 tar_paths, 最后 tar_path
 	tarPaths := req.TarPaths
 	if len(tarPaths) == 0 && req.TarPath != "" {
 		tarPaths = []string{req.TarPath}
 	}
-
-	// 如果有 COS 文件,先下载到本地
-	if len(req.COSFiles) > 0 {
-		cfg := config.Get()
-		downloadDir := filepath.Join(cfg.WorkDir, "downloads")
-		if err := os.MkdirAll(downloadDir, 0755); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "创建下载目录失败: " + err.Error()})
-			return
-		}
-		for _, cosKey := range req.COSFiles {
-			localName := filepath.Base(cosKey)
-			localPath := filepath.Join(downloadDir, localName)
-			if err := h.cosService.DownloadFile(cosKey, localPath); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "下载COS文件失败 " + cosKey + ": " + err.Error()})
-				return
-			}
-			log.Printf("[CSV过滤] COS下载完成: %s -> %s", cosKey, localPath)
-			tarPaths = append(tarPaths, localPath)
-		}
-	}
-
 	if len(tarPaths) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要一个 tar.gz 路径或 COS 文件"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要一个已下载的 tar.gz 路径"})
 		return
 	}
 

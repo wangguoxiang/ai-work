@@ -242,7 +242,7 @@ export const createCOSFilterTask = (req: CreateCOSFilterTaskRequest) =>
 
 export interface CSVFilterRequest {
   tar_paths?: string[];
-  cos_files?: string[];
+  tar_path?: string;
   csv_path: string;
   output_path?: string;
   restart?: boolean;
@@ -296,5 +296,9 @@ export const uploadCSVFile = (file: File) => {
     timeout: 60000,
   });
 };
+
+// COS文件下载(返回本地路径)
+export const downloadCOSFile = (cosKey: string) =>
+  api.post<{ cos_key: string; local_path: string; file_name: string }>('/cos/download', { cos_key: cosKey });
 
 export default api;
