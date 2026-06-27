@@ -334,4 +334,69 @@ export interface DownloadProgressItem {
 export const listDownloads = () =>
   api.get<{ total: number; tasks: DownloadProgressItem[] }>('/cos/downloads');
 
+// ============ 管道任务（下载 → 过滤 → 导入MySQL 统一进度） ============
+
+export interface FileDownloadInfo {
+  cos_key: string;
+  file_name: string;
+  progress: number;
+  message: string;
+  done: boolean;
+  error?: string;
+  local_path?: string;
+}
+
+export interface PipelineTask {
+  id: string;
+  status: string;           // pending / downloading / filtering / importing / completed / failed
+  progress: number;         // 整体进度 0-100
+  error?: string;
+  start_at: number;
+  updated_at: number;
+  elapsed: string;
+  cos_keys: string[];
+  tids: string[];
+  vins: string[];
+  plate_nos: string[];
+  csv_path: string;
+
+  // 下载阶段
+  downloads: FileDownloadInfo[];
+  download_progress: number;
+
+  // 过滤阶段
+  filter_status: string;
+  filter_progress: number;
+  filter_task_id: string;
+  filter_lines_kept: number;
+  filter_lines_raw: number;
+
+  // 导入阶段
+  import_status: string;
+  import_progress: number;
+  import_done: number;
+  import_total: number;
+  import_error?: string;
+}
+
+export interface CreatePipelineRequest {
+  cos_keys: string[];
+  tids: string[];
+  vins?: string[];
+  plate_nos?: string[];
+  csv_path: string;
+}
+
+// 创建管道任务
+export const createPipeline = (req: CreatePipelineRequest) =>
+  api.post<{ task_id: string; status: string; message: string }>('/pipeline/create', req);
+
+// 获取单个管道任务
+export const getPipeline = (taskId: string) =>
+  api.get<PipelineTask>(`/pipeline/task/${taskId}`);
+
+// 获取所有管道任务列表
+export const listPipelines = () =>
+  api.get<{ total: number; tasks: PipelineTask[] }>('/pipeline/tasks');
+
 export default api;

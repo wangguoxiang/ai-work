@@ -111,6 +111,11 @@ func main() {
 		api.POST("/filter/csv-submit", h.StartCSVFilter)
 		api.GET("/filter/csv-tasks", h.ListCSVFilterTasks)
 		api.GET("/filter/csv-cancel", h.CancelCSVFilterTask)
+
+		// 管道任务(下载 → 过滤 → 导入MySQL，整体进度)
+		api.POST("/pipeline/create", h.CreatePipeline)
+		api.GET("/pipeline/task/:taskId", h.GetPipeline)
+		api.GET("/pipeline/tasks", h.ListPipelines)
 	}
 
 	// 优雅关闭

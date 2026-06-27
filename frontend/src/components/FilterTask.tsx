@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Card,
-  InputNumber,
   Button,
   Space,
   Tag,
@@ -13,7 +12,6 @@ import {
   Col,
   Checkbox,
   Progress,
-  Divider,
 } from 'antd';
 import {
   PlayCircleOutlined,
@@ -26,19 +24,20 @@ import {
   LoadingOutlined,
   FileOutlined,
   CopyOutlined,
+  DownloadOutlined,
+  FilterOutlined,
+  DatabaseOutlined,
 } from '@ant-design/icons';
 import {
   getConfig,
   importCSV,
   listCOSFiles,
-  submitCSVFilter,
-  listCSVFilterTasks,
-  downloadCOSFile,
-  getDownloadProgress,
-  listDownloads,
+  createPipeline,
+  listPipelines,
   TIDImportItem,
   COSFileInfo,
-  CSVFilterTask,
+  PipelineTask,
+  FileDownloadInfo,
 } from '../api';
 
 const { Text } = Typography;
@@ -47,18 +46,6 @@ interface TIDEntry {
   tid: string;
   vin: string;
   plate_no: string;
-}
-
-// DownloadTask 单个文件下载任务
-interface DownloadTask {
-  task_id: string;   // backend 返回的 task_id (即 cos_key)
-  cos_key: string;
-  file_name: string;
-  progress: number;
-  message: string;
-  done: boolean;
-  error: string;
-  local_path: string;
 }
 
 const FilterTask: React.FC = () => {
@@ -74,87 +61,32 @@ const FilterTask: React.FC = () => {
   const [selectedCOSFiles, setSelectedCOSFiles] = useState<Set<string>>(new Set());
   const [cosLoading, setCosLoading] = useState(false);
 
-  // 下载任务列表（表格展示）
-  const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
-  const [allDownloaded, setAllDownloaded] = useState(false);
-
-  // CSV过滤任务
+  // 管道任务（统一管理下载→过滤→导入）
+  const [pipelineTasks, setPipelineTasks] = useState<PipelineTask[]>([]);
   const [taskLoading, setTaskLoading] = useState(false);
-  const [csvTasks, setCsvTasks] = useState<CSVFilterTask[]>([]);
   const [workerCount, setWorkerCount] = useState(4);
 
-  // 加载配置 & 恢复下载任务
+  // 加载配置 & 恢复管道任务
   useEffect(() => {
     getConfig().then(r => setWorkerCount(r.data.worker_count)).catch(() => {});
-    loadCSVFilterTasks();
+    loadPipelines();
     loadCOSFiles();
-    // 从后端恢复进行中/已完成的下载任务
-    (async () => {
-      try {
-        const resp = await listDownloads();
-        const items: DownloadTask[] = resp.data.tasks.map(t => ({
-          task_id: t.task_id,
-          cos_key: t.task_id,
-          file_name: t.file_name,
-          progress: t.progress,
-          message: t.message,
-          done: t.done,
-          error: t.error || '',
-          local_path: t.local_path,
-        }));
-        if (items.length > 0) {
-          setDownloadTasks(items);
-        }
-      } catch (_) {}
-    })();
   }, []);
 
-  // 定时刷新运行中的 CSV 过滤任务
+  // 定时刷新管道任务（自动覆盖下载/过滤/导入所有阶段）
   useEffect(() => {
-    const hasRunning = csvTasks.some(t => t.status === 'running' || t.status === 'pending' || t.status === 'resumed');
+    const hasRunning = pipelineTasks.some(t =>
+      t.status === 'downloading' || t.status === 'filtering' || t.status === 'importing'
+    );
     if (!hasRunning) return;
-    const timer = setInterval(loadCSVFilterTasks, 3000);
+    const timer = setInterval(loadPipelines, 2000);
     return () => clearInterval(timer);
-  }, [csvTasks]);
+  }, [pipelineTasks]);
 
-  // 定时刷新进行中的 COS 下载任务（页面刷新后恢复下载进度）
-  useEffect(() => {
-    const ongoing = downloadTasks.filter(t => !t.done && !!t.task_id);
-    if (ongoing.length === 0) return;
-    const timer = setInterval(async () => {
-      try {
-        const results = await Promise.allSettled(
-          ongoing.map(t => getDownloadProgress(t.task_id))
-        );
-        setDownloadTasks(prev => {
-          const map = new Map(prev.map(t => [t.task_id, t]));
-          for (const r of results) {
-            if (r.status === 'fulfilled') {
-              const d = r.value.data;
-              const existing = map.get(d.task_id);
-              if (existing) {
-                map.set(d.task_id, {
-                  ...existing,
-                  progress: d.progress,
-                  message: d.message,
-                  done: d.done,
-                  error: d.error || '',
-                  local_path: d.local_path || existing.local_path,
-                });
-              }
-            }
-          }
-          return Array.from(map.values());
-        });
-      } catch (_) {}
-    }, 3000);
-    return () => clearInterval(timer);
-  }, [downloadTasks]);
-
-  const loadCSVFilterTasks = async () => {
+  const loadPipelines = async () => {
     try {
-      const resp = await listCSVFilterTasks();
-      setCsvTasks(resp.data.tasks || []);
+      const resp = await listPipelines();
+      setPipelineTasks(resp.data.tasks || []);
     } catch (_) {}
   };
 
@@ -209,6 +141,22 @@ const FilterTask: React.FC = () => {
     setTidEntries(tidEntries.filter((_, i) => i !== idx));
   };
 
+  // 管道状态标签
+  const getPipelineStatusTag = (status: string) => {
+    const m: Record<string, { label: string; color: string }> = {
+      pending: { label: '等待', color: 'default' },
+      downloading: { label: '下载中', color: 'processing' },
+      filtering: { label: '过滤中', color: 'processing' },
+      importing: { label: '导入中', color: 'processing' },
+      completed: { label: '已完成', color: 'success' },
+      failed: { label: '失败', color: 'error' },
+    };
+    const info = m[status] || { label: status, color: 'default' };
+    const icon = status === 'downloading' || status === 'filtering' || status === 'importing'
+      ? <LoadingOutlined /> : undefined;
+    return <Tag icon={icon} color={info.color} style={{ fontSize: 11 }}>{info.label}</Tag>;
+  };
+
   const toggleCOSFile = (key: string) => {
     const s = new Set(selectedCOSFiles);
     s.has(key) ? s.delete(key) : s.add(key);
@@ -223,102 +171,21 @@ const FilterTask: React.FC = () => {
 
     const cosKeys = Array.from(selectedCOSFiles);
     setTaskLoading(true);
-    setAllDownloaded(false);
-
-    // 初始化下载任务列表
-    const initTasks: DownloadTask[] = cosKeys.map(key => ({
-      task_id: '',  // startDownload 后补充
-      cos_key: key,
-      file_name: key.split('/').pop() || key,
-      progress: 0,
-      message: '排队中',
-      done: false,
-      error: '',
-      local_path: '',
-    }));
-    setDownloadTasks(initTasks);
-
-    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-    const downloadedPaths: string[] = [];
 
     try {
-      for (let i = 0; i < cosKeys.length; i++) {
-        const cosKey = cosKeys[i];
-        let taskId: string;
-
-        // 标记当前文件开始下载
-        setDownloadTasks(prev => prev.map((t, idx) =>
-          idx === i ? { ...t, message: '启动中...' } : t
-        ));
-
-        // 启动下载（不强制覆盖）
-        try {
-          const startResp = await downloadCOSFile(cosKey, false);
-          taskId = startResp.data.task_id;
-          // 保存后端返回的 task_id，以便页面刷新后恢复进度
-          setDownloadTasks(prev => prev.map((t, idx) =>
-            idx === i ? { ...t, task_id: taskId, local_path: startResp.data.local_path } : t
-          ));
-        } catch (firstErr: any) {
-          if (firstErr.response?.status === 409) {
-            const doOverwrite = window.confirm(
-              `服务器上已存在文件 ${initTasks[i].file_name}，是否覆盖重新下载？`
-            );
-            if (doOverwrite) {
-              const startResp = await downloadCOSFile(cosKey, true);
-              taskId = startResp.data.task_id;
-              setDownloadTasks(prev => prev.map((t, idx) =>
-                idx === i ? { ...t, task_id: taskId, local_path: startResp.data.local_path } : t
-              ));
-            } else {
-              const existingPath = firstErr.response.data.local_path;
-              downloadedPaths.push(existingPath);
-              setDownloadTasks(prev => prev.map((t, idx) =>
-                idx === i ? { ...t, progress: 100, message: '跳过(已存在)', done: true, local_path: existingPath } : t
-              ));
-              continue;
-            }
-          } else {
-            throw firstErr;
-          }
-        }
-
-        // 轮询下载进度，每3秒更新表格
-        for (;;) {
-          await sleep(3000);
-          const progResp = await getDownloadProgress(taskId);
-          const { progress, message: progMsg, done, error, local_path } = progResp.data;
-          setDownloadTasks(prev => prev.map((t, idx) =>
-            idx === i ? { ...t, progress, message: progMsg || `${progress}%`, local_path } : t
-          ));
-          if (done) {
-            if (error) {
-              setDownloadTasks(prev => prev.map((t, idx) =>
-                idx === i ? { ...t, error, done: true } : t
-              ));
-              throw new Error(error);
-            }
-            downloadedPaths.push(local_path);
-            break;
-          }
-        }
-      }
-
-      setAllDownloaded(true);
-      message.success(`全部 ${cosKeys.length} 个COS文件下载完成`);
-
-      // 步骤2: 提交CSV过滤任务
-      message.loading({ content: '正在提交CSV过滤任务...', key: 'filter_msg', duration: 0 });
-      await submitCSVFilter({
-        tar_paths: downloadedPaths,
+      await createPipeline({
+        cos_keys: cosKeys,
+        tids: validTIDs,
+        vins: tidEntries.map(e => e.vin).filter(Boolean),
+        plate_nos: tidEntries.map(e => e.plate_no).filter(Boolean),
         csv_path: csvFilePath,
       });
-      message.success({ content: '管道任务已创建: 过滤中 → 完成后自动导入MySQL', key: 'filter_msg', duration: 5 });
-      loadCSVFilterTasks();
+      message.success({ content: '管道任务已创建: 下载 → 过滤 → 自动导入MySQL，全部在后台执行', key: 'pipeline_msg', duration: 5 });
+      loadPipelines();
     } catch (err: any) {
       const detail = err.response?.data?.error || err.message;
       message.destroy();
-      message.error('操作失败: ' + detail);
+      message.error('创建管道任务失败: ' + detail);
     } finally {
       setTaskLoading(false);
     }
@@ -455,41 +322,6 @@ const FilterTask: React.FC = () => {
         </Col>
 
         <Col xs={24} lg={10}>
-          {/* 下载进度列表 */}
-          {downloadTasks.length > 0 && (
-            <Card title={<span>下载进度</span>} style={{ marginBottom: 16 }}>
-              <Table dataSource={downloadTasks} rowKey="cos_key" size="small" pagination={false}
-                columns={[
-                  { title: '文件', dataIndex: 'file_name', key: 'file_name', ellipsis: true,
-                    render: (v: string) => <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</Text> },
-                  { title: '进度', dataIndex: 'progress', key: 'progress', width: 140,
-                    render: (p: number, r: DownloadTask) => (
-                      <Progress percent={r.done && !r.error ? 100 : p} size="small"
-                        status={r.error ? 'exception' : undefined} style={{ margin: 0 }} />
-                    ),
-                  },
-                  { title: '状态', dataIndex: 'message', key: 'message', width: 160, ellipsis: true,
-                    render: (msg: string, r: DownloadTask) =>
-                      r.error ? <Tag color="error">失败</Tag>
-                      : r.done ? <Tag color="success">完成</Tag>
-                      : r.progress > 0 ? <Tag color="processing">{r.progress}%</Tag>
-                      : <Tag>{msg}</Tag>,
-                  },
-                ]} />
-            </Card>
-          )}
-
-          {/* 并行配置 */}
-          <Card title={<span>并行配置</span>} style={{ marginBottom: 16 }}>
-            <div style={{ marginBottom: 4 }}>
-              <label style={{ fontSize: 12, color: '#6b7280', display: 'block', marginBottom: 6 }}>
-                并行线程数
-              </label>
-              <InputNumber value={workerCount} min={1} max={64}
-                onChange={v => setWorkerCount(v || 4)} style={{ width: '100%' }} />
-            </div>
-          </Card>
-
           {/* 执行任务 */}
           <Card title={<span>执行任务</span>} style={{ marginBottom: 16 }}>
             <div style={{ textAlign: 'center' }}>
@@ -500,84 +332,100 @@ const FilterTask: React.FC = () => {
               </Button>
             </div>
             <Alert style={{ marginTop: 12 }}
-              message="流程: 下载COS文件 → 按CSV绑定段过滤SQL → 导入过滤结果到临时MySQL数据库" type="info" showIcon />
+              message="流程: 下载COS文件 → 按CSV绑定段过滤SQL → 导入到临时MySQL数据库（全部在后台独立执行，关闭页面不影响）" type="info" showIcon />
           </Card>
 
-          {/* 任务列表(CSV过滤任务) */}
-          <Card title={<span>CSV过滤任务列表</span>} style={{ marginBottom: 16 }}
-            extra={<Button size="small" onClick={loadCSVFilterTasks}>刷新</Button>}>
-            {csvTasks.length === 0
-              ? <Text type="secondary">暂无任务</Text>
-              : <Table dataSource={csvTasks} columns={csvTaskCols}
-                  rowKey="id" size="small" pagination={{ pageSize: 5 }}
-                  expandable={{
-                    expandedRowRender: (record: CSVFilterTask) => (
-                      <div style={{ padding: '8px 0' }}>
-                        <Row gutter={[16, 8]}>
-                          <Col span={12}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              CSV: <Text code style={{ fontSize: 11 }}>{record.csv_path}</Text>
-                            </Text>
-                          </Col>
-                          <Col span={12}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              输出: <Text code style={{ fontSize: 11 }}>{record.output_path}</Text>
-                            </Text>
-                          </Col>
-                          <Col span={8}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              已处理行: <Text strong>{fmtNum(record.lines_done)}</Text>
-                            </Text>
-                          </Col>
-                          <Col span={8}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              数据时间范围: <Text strong>{fmtTS(record.first_ts)} ~ {fmtTS(record.last_ts)}</Text>
-                            </Text>
-                          </Col>
-                          <Col span={8}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              最后更新: <Text strong>{fmtTS(record.updated_at)}</Text>
-                            </Text>
-                          </Col>
-                          {record.resumed && (
-                            <Col span={24}><Tag color="warning">断点续传</Tag></Col>
-                          )}
-                          {record.error && (
-                            <Col span={24}><Alert type="error" message={record.error} banner style={{ fontSize: 12 }} /></Col>
-                          )}
-                          {/* 导入阶段详情 */}
-                          {record.import_status && record.import_status !== '' && (
-                            <>
-                              <Col span={24}><Divider style={{ margin: '4px 0' }} /></Col>
-                              <Col span={24}>
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                  MySQL导入状态：
-                                  {record.import_status === 'importing' && <Tag color="processing" style={{ marginLeft: 4 }}>导入中</Tag>}
-                                  {record.import_status === 'done' && <Tag color="success" style={{ marginLeft: 4 }}>导入完成</Tag>}
-                                  {record.import_status === 'failed' && <Tag color="error" style={{ marginLeft: 4 }}>导入失败</Tag>}
-                                  {record.import_status === 'pending' && <Tag style={{ marginLeft: 4 }}>等待导入</Tag>}
-                                </Text>
-                              </Col>
-                              <Col span={12}>
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                  导入进度: <Text strong>{record.import_progress || 0}%</Text>
-                                </Text>
-                              </Col>
-                              <Col span={12}>
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                  已导入: <Text strong>{fmtNum(record.import_done)}</Text> / {fmtNum(record.import_total)} 条
-                                </Text>
-                              </Col>
-                              {record.import_error && (
-                                <Col span={24}><Alert type="error" message={record.import_error} banner style={{ fontSize: 12 }} /></Col>
-                              )}
-                            </>
-                          )}
-                        </Row>
+          {/* 管道任务列表（统一显示整体进度和子任务进度） */}
+          <Card title={<span>📊 管道任务进度</span>} style={{ marginBottom: 16 }}
+            extra={<Button size="small" icon={<ReloadOutlined />} onClick={loadPipelines}>刷新</Button>}>
+            {pipelineTasks.length === 0
+              ? <Text type="secondary">暂无管道任务</Text>
+              : <div style={{ maxHeight: 600, overflow: 'auto' }}>
+                  {pipelineTasks.map(task => (
+                    <Card key={task.id} size="small" style={{ marginBottom: 8 }}
+                      title={
+                        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                          <Text style={{ fontSize: 13 }}>{task.elapsed || '--'}</Text>
+                          {getPipelineStatusTag(task.status)}
+                        </Space>
+                      }>
+                      {/* 整体进度 */}
+                      <div style={{ marginBottom: 10 }}>
+                        <Text strong style={{ fontSize: 13 }}>整体进度 {task.progress}%</Text>
+                        <Progress percent={task.progress} size="small"
+                          status={task.status === 'failed' ? 'exception' : undefined} />
                       </div>
-                    ),
-                    rowExpandable: () => true,
-                  }} />}
+
+                      {/* 三个阶段状态 */}
+                      <Row gutter={16} style={{ marginBottom: 8 }}>
+                        <Col span={8} style={{ textAlign: 'center' }}>
+                          <DownloadOutlined style={{ fontSize: 20, color: task.download_progress >= 100 ? '#52c41a' : '#1890ff' }} />
+                          <div><Text type="secondary" style={{ fontSize: 11 }}>下载</Text></div>
+                          <Text style={{ fontSize: 12, fontWeight: 600 }}>{task.download_progress}%</Text>
+                        </Col>
+                        <Col span={8} style={{ textAlign: 'center' }}>
+                          <FilterOutlined style={{ fontSize: 20, color: task.filter_progress >= 100 ? '#52c41a' : task.filter_progress > 0 ? '#1890ff' : '#d9d9d9' }} />
+                          <div><Text type="secondary" style={{ fontSize: 11 }}>过滤</Text></div>
+                          <Text style={{ fontSize: 12, fontWeight: 600 }}>{task.filter_progress}%</Text>
+                        </Col>
+                        <Col span={8} style={{ textAlign: 'center' }}>
+                          <DatabaseOutlined style={{ fontSize: 20, color: task.import_progress >= 100 ? '#52c41a' : task.import_progress > 0 ? '#1890ff' : '#d9d9d9' }} />
+                          <div><Text type="secondary" style={{ fontSize: 11 }}>导入MySQL</Text></div>
+                          <Text style={{ fontSize: 12, fontWeight: 600 }}>{task.import_progress}%</Text>
+                        </Col>
+                      </Row>
+
+                      {/* 展开详情 */}
+                      <details style={{ marginTop: 8 }}>
+                        <summary style={{ cursor: 'pointer', fontSize: 12, color: '#666' }}>查看详细进度</summary>
+                        <div style={{ padding: '8px 0 0 8px' }}>
+                          {/* 下载文件明细 */}
+                          {task.downloads.length > 0 && (
+                            <div style={{ marginBottom: 8 }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>下载文件:</Text>
+                              {task.downloads.map((f, fi) => (
+                                <div key={fi} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                                  <Text ellipsis style={{ width: 140, fontSize: 11, fontFamily: 'monospace' }}>{f.file_name}</Text>
+                                  <Progress percent={f.done ? 100 : f.progress} size="small" style={{ width: 100, margin: 0 }} />
+                                  <Text style={{ fontSize: 10, color: f.error ? 'red' : '#666' }}>
+                                    {f.error ? '失败' : f.done ? '完成' : `${f.progress}%`}
+                                  </Text>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {/* 过滤信息 */}
+                          {task.filter_status && (
+                            <div style={{ marginBottom: 6 }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                过滤: 保留 <Text strong style={{ color: '#16a34a' }}>{fmtNum(task.filter_lines_kept)}</Text> / {fmtNum(task.filter_lines_raw)} 条
+                                {' | '}状态: {task.filter_status}
+                              </Text>
+                            </div>
+                          )}
+                          {/* 导入信息 */}
+                          {task.import_status && task.import_status !== '' && (
+                            <div>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                导入MySQL: <Text strong>{fmtNum(task.import_done)}</Text> / {fmtNum(task.import_total)} 条
+                                {' | '}状态:
+                                {task.import_status === 'importing' && <Tag color="processing" style={{ marginLeft: 4, fontSize: 10 }}>导入中</Tag>}
+                                {task.import_status === 'done' && <Tag color="success" style={{ marginLeft: 4, fontSize: 10 }}>完成</Tag>}
+                                {task.import_status === 'failed' && <Tag color="error" style={{ marginLeft: 4, fontSize: 10 }}>失败</Tag>}
+                              </Text>
+                              {task.import_error && <div><Text type="danger" style={{ fontSize: 11 }}>{task.import_error}</Text></div>}
+                            </div>
+                          )}
+                          {/* 错误信息 */}
+                          {task.error && (
+                            <Alert type="error" message={task.error} banner style={{ fontSize: 11, marginTop: 4 }} />
+                          )}
+                        </div>
+                      </details>
+                    </Card>
+                  ))}
+                </div>
+            }
           </Card>
         </Col>
       </Row>

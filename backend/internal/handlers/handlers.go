@@ -28,6 +28,7 @@ type Handler struct {
 	bindLogService *services.BindLogService
 	cosService     *services.COSService
 	csvFilterMgr   *services.CSVFilterTaskManager
+	pipelineMgr    *services.PipelineTaskManager
 }
 
 // NewHandler 创建处理器
@@ -39,6 +40,7 @@ func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *se
 		bindLogService: bls,
 		cosService:     cs,
 		csvFilterMgr:   services.NewCSVFilterTaskManager(),
+		pipelineMgr:    services.NewPipelineTaskManager(),
 	}
 }
 
@@ -792,6 +794,103 @@ func (h *Handler) ListDownloads(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"total": len(items),
 		"tasks": items,
+	})
+}
+
+// ========== 管道任务 API ==========
+
+// CreatePipelineRequest 创建管道请求
+type CreatePipelineRequest struct {
+	COSKeys  []string `json:"cos_keys" binding:"required"`
+	TIDs     []string `json:"tids" binding:"required"`
+	VINs     []string `json:"vins"`
+	PlateNos []string `json:"plate_nos"`
+	CSVPath  string   `json:"csv_path" binding:"required"`
+}
+
+// CreatePipeline 创建并启动管道任务
+func (h *Handler) CreatePipeline(c *gin.Context) {
+	var req CreatePipelineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	if len(req.COSKeys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少选择一个COS文件"})
+		return
+	}
+	if len(req.TIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少提供一个TID"})
+		return
+	}
+
+	// 保存TID带车牌信息到文件
+	tidWithPlates := make([]services.TIDWithPlate, len(req.TIDs))
+	for i, tid := range req.TIDs {
+		vin := ""
+		plateNo := ""
+		if i < len(req.VINs) {
+			vin = req.VINs[i]
+		}
+		if i < len(req.PlateNos) {
+			plateNo = req.PlateNos[i]
+		}
+		tidWithPlates[i] = services.TIDWithPlate{
+			TID:     tid,
+			VIN:     vin,
+			PlateNo: plateNo,
+		}
+	}
+	cfg := config.Get()
+	tidFilePath, err := services.SaveTIDFile(cfg.WorkDir, tidWithPlates)
+	if err == nil {
+		_ = tidFilePath // 保存成功，暂不处理
+	}
+
+	// 创建管道任务
+	pipelineReq := &services.PipelineCreateRequest{
+		COSKeys:  req.COSKeys,
+		TIDs:     req.TIDs,
+		VINs:     req.VINs,
+		PlateNos: req.PlateNos,
+		CSVPath:  req.CSVPath,
+	}
+	task := h.pipelineMgr.Create(pipelineReq)
+
+	// 后台异步执行
+	go h.pipelineMgr.RunPipeline(task, h.cosService, h.csvFilterMgr)
+
+	log.Printf("[管道] 创建: id=%s, cos文件数=%d, TIDs=%d", task.ID, len(req.COSKeys), len(req.TIDs))
+
+	c.JSON(http.StatusOK, gin.H{
+		"task_id": task.ID,
+		"status":  task.Status,
+		"message": "管道任务已创建，后台执行中",
+	})
+}
+
+// GetPipeline 查询管道任务状态
+func (h *Handler) GetPipeline(c *gin.Context) {
+	taskID := c.Param("taskId")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 不能为空"})
+		return
+	}
+	task, ok := h.pipelineMgr.Get(taskID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		return
+	}
+	// 同步导入进度后在 getSnapshot 中已处理
+	c.JSON(http.StatusOK, task)
+}
+
+// ListPipelines 列出所有管道任务
+func (h *Handler) ListPipelines(c *gin.Context) {
+	tasks := h.pipelineMgr.List()
+	c.JSON(http.StatusOK, gin.H{
+		"total": len(tasks),
+		"tasks": tasks,
 	})
 }
 
