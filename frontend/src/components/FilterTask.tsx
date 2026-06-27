@@ -234,54 +234,6 @@ const FilterTask: React.FC = () => {
     if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
     return Math.floor(ms / 60000) + 'm' + Math.floor((ms % 60000) / 1000) + 's';
   }
-
-  const csvTaskCols = [
-    { title: '状态', dataIndex: 'status', key: 'status', width: 90,
-      render: (s: string) => {
-        const m: Record<string, { label: string; color: string }> = {
-          pending: { label: '排队中', color: 'default' },
-          running: { label: '运行中', color: 'processing' },
-          done: { label: '已完成', color: 'success' },
-          failed: { label: '失败/取消', color: 'error' },
-          resumed: { label: '续传中', color: 'warning' },
-        };
-        const info = m[s] || { label: s, color: 'default' };
-        const icon = s === 'running' || s === 'resumed' ? <LoadingOutlined />
-          : s === 'done' ? <CheckCircleOutlined />
-          : s === 'failed' ? <CloseCircleOutlined /> : undefined;
-        return <Tag icon={icon} color={info.color}>{info.label}</Tag>;
-      },
-    },
-    { title: '文件', dataIndex: 'tar_path', key: 'tar_path', ellipsis: true, width: 180,
-      render: (v: string) => <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '-'}</Text> },
-    { title: '过滤进度', dataIndex: 'pct', key: 'pct', width: 100,
-      render: (pct: number, record: CSVFilterTask) => {
-        const p = record.status === 'done' ? 100 : pct || 0;
-        return <Progress percent={p} size="small" style={{ margin: 0 }} />;
-      },
-    },
-    { title: '导入进度', key: 'import_progress', width: 100,
-      render: (_: any, record: CSVFilterTask) => {
-        if (!record.import_status || record.import_status === '') return <Text type="secondary">-</Text>;
-        if (record.import_status === 'done') return <Progress percent={100} size="small" style={{ margin: 0 }} />;
-        if (record.import_status === 'failed') return <Progress percent={record.import_progress || 0} size="small" status="exception" style={{ margin: 0 }} />;
-        return <Progress percent={record.import_progress || 0} size="small" status="active" style={{ margin: 0 }} />;
-      },
-    },
-    { title: '保留/原始', key: 'stats', width: 100,
-      render: (_: any, record: CSVFilterTask) => (
-        <Text style={{ fontSize: 12 }}>
-          <Text style={{ color: '#16a34a', fontWeight: 600 }}>{fmtNum(record.kept_lines)}</Text>
-          / {fmtNum(record.raw_lines)}
-        </Text>
-      ),
-    },
-    { title: '耗时', key: 'duration', width: 70,
-      render: (_: any, record: CSVFilterTask) =>
-        record.status === 'pending' ? '-' : fmtDur(record.started_at, record.finished_at),
-    },
-  ];
-
   return (
     <div>
       <Row gutter={16}>
