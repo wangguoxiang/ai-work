@@ -316,6 +316,10 @@ func csvDefaultOutputPath(tarPath string) string {
 // ========== CSV 解析 ==========
 
 // ReadCSV 读取 CSV,返回 map[tid][]CSVSegment
+// 支持两种格式:
+//
+//	格式A(带表头): tid, vin, plate_no, bind_ts, unbind_ts  — 自动按列名查找
+//	格式B(无表头): tid, ..., bind_ts, unbind_ts            — 固定索引(row[2], row[3])
 func ReadCSV(path string) (map[string][]CSVSegment, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -334,31 +338,100 @@ func ReadCSV(path string) (map[string][]CSVSegment, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("CSV 为空")
 	}
-	dataStart := 0
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(all[0][0])), "tid") {
-		dataStart = 1
+
+	// 检测是否有表头，并确定各列索引
+	var tidIdx, bindTsIdx, unbindTsIdx int
+	hasHeader := false
+
+	firstRow := all[0]
+	headerMap := make(map[string]int)
+	for i, col := range firstRow {
+		clean := strings.TrimSpace(strings.ToLower(col))
+		clean = strings.TrimLeft(clean, "\ufeff\u00a0")
+		headerMap[clean] = i
 	}
+
+	// 检查第一行是否包含常见的表头关键字
+	if idx, ok := headerMap["tid"]; ok {
+		hasHeader = true
+		tidIdx = idx
+	} else if _, ok := headerMap["tid"]; !ok && len(firstRow) > 0 {
+		// 第一列可能是 TID（无表头格式）
+		hasHeader = false
+	}
+
+	if hasHeader {
+		tidIdx = headerMap["tid"]
+		// 查找 bind_ts/未绑时间列
+		if idx, ok := headerMap["bind_ts"]; ok {
+			bindTsIdx = idx
+		} else if idx, ok := headerMap["bind_time"]; ok {
+			bindTsIdx = idx
+		} else {
+			bindTsIdx = 2 // 回退到固定索引
+		}
+		if idx, ok := headerMap["unbind_ts"]; ok {
+			unbindTsIdx = idx
+		} else if idx, ok := headerMap["unbind_time"]; ok {
+			unbindTsIdx = idx
+		} else {
+			unbindTsIdx = 3 // 回退到固定索引
+		}
+	} else {
+		tidIdx = 0
+		bindTsIdx = 2
+		unbindTsIdx = 3
+	}
+
+	dataStart := 0
+	if hasHeader {
+		dataStart = 1
+	} else if strings.HasPrefix(strings.ToLower(strings.TrimSpace(all[0][0])), "tid") {
+		dataStart = 1
+		hasHeader = true
+		tidIdx = 0
+		bindTsIdx = 2
+		unbindTsIdx = 3
+	}
+
 	segments := make(map[string][]CSVSegment)
 	for _, row := range all[dataStart:] {
-		if len(row) < 4 {
+		maxIdx := tidIdx
+		if bindTsIdx > maxIdx {
+			maxIdx = bindTsIdx
+		}
+		if unbindTsIdx > maxIdx {
+			maxIdx = unbindTsIdx
+		}
+		if len(row) <= maxIdx {
 			continue
 		}
 		for i := range row {
 			row[i] = strings.TrimSpace(row[i])
 		}
-		tid := row[0]
+		tid := row[tidIdx]
 		if tid == "" {
 			continue
 		}
-		bt, err1 := strconv.ParseInt(row[2], 10, 64)
+
+		// 支持整数时间戳和日期时间字符串
+		bt, err1 := strconv.ParseInt(row[bindTsIdx], 10, 64)
 		if err1 != nil {
-			continue
+			// 尝试解析日期时间格式 "2006-01-02 15:04:05"
+			bt, err1 = parseDateTimeToUnix(row[bindTsIdx])
+			if err1 != nil {
+				continue
+			}
 		}
 		ubt := int64(0)
-		if row[3] != "" {
-			ubt, err = strconv.ParseInt(row[3], 10, 64)
+		if row[unbindTsIdx] != "" {
+			ubt, err = strconv.ParseInt(row[unbindTsIdx], 10, 64)
 			if err != nil {
-				continue
+				ubt, err = parseDateTimeToUnix(row[unbindTsIdx])
+				if err != nil {
+					// 解绑时间可选，解析失败时视为未解绑
+					ubt = 0
+				}
 			}
 		}
 		segments[tid] = append(segments[tid], CSVSegment{BindTS: bt, UnbindTS: ubt})
@@ -367,6 +440,26 @@ func ReadCSV(path string) (map[string][]CSVSegment, error) {
 		return nil, fmt.Errorf("CSV 中未解析到有效数据")
 	}
 	return segments, nil
+}
+
+// parseDateTimeToUnix 尝试解析日期时间字符串为 Unix 时间戳
+// 支持格式: "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006/01/02 15:04:05"
+func parseDateTimeToUnix(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "'\"")
+	formats := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006/01/02 15:04:05",
+		"2006-01-02",
+		"2006/01/02",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t.Unix(), nil
+		}
+	}
+	return 0, fmt.Errorf("无法解析日期时间: %s", s)
 }
 
 // ========== SQL 解析核心函数 ==========
