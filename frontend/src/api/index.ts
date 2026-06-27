@@ -313,4 +313,19 @@ export const getDownloadProgress = (taskId: string) =>
     params: { task_id: taskId },
   });
 
+// COS下载任务进度条目
+export interface DownloadProgressItem {
+  task_id: string;
+  progress: number;
+  message: string;
+  local_path: string;
+  file_name: string;
+  error?: string;
+  done: boolean;
+}
+
+// 列出所有COS下载任务进度（刷新页面后恢复用）
+export const listDownloads = () =>
+  api.get<{ total: number; tasks: DownloadProgressItem[] }>('/cos/downloads');
+
 export default api;

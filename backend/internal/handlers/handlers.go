@@ -759,6 +759,42 @@ func (h *Handler) GetDownloadProgress(c *gin.Context) {
 	})
 }
 
+// dlProgressItem 用于 ListDownloads 返回的单个下载任务快照
+type dlProgressItem struct {
+	TaskID    string `json:"task_id"`
+	Progress  int    `json:"progress"`
+	Message   string `json:"message"`
+	LocalPath string `json:"local_path"`
+	FileName  string `json:"file_name"`
+	Error     string `json:"error,omitempty"`
+	Done      bool   `json:"done"`
+}
+
+// ListDownloads 列出所有（进行中/已完成）的 COS 下载任务进度
+func (h *Handler) ListDownloads(c *gin.Context) {
+	dlProgressMu.Lock()
+	items := make([]dlProgressItem, 0, len(dlProgresses))
+	for key, p := range dlProgresses {
+		p.mu.Lock()
+		items = append(items, dlProgressItem{
+			TaskID:    key,
+			Progress:  p.Progress,
+			Message:   p.Message,
+			LocalPath: p.LocalPath,
+			FileName:  p.FileName,
+			Error:     p.Error,
+			Done:      p.Done,
+		})
+		p.mu.Unlock()
+	}
+	dlProgressMu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"total": len(items),
+		"tasks": items,
+	})
+}
+
 // ========== CSV 过滤器 API ==========
 
 // CSVFilterRequest CSV过滤请求

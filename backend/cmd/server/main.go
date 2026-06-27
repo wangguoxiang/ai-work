@@ -104,6 +104,7 @@ func main() {
 		// COS文件下载(异步,返回task_id用于轮询进度)
 		api.POST("/cos/download", h.DownloadCOSFile)
 		api.GET("/cos/download-progress", h.GetDownloadProgress)
+		api.GET("/cos/downloads", h.ListDownloads)
 
 		// CSV过滤任务(直接从gzip SQL文件按CSV绑定段过滤)
 		api.POST("/filter/csv-upload", h.UploadCSVFile)

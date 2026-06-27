@@ -34,6 +34,7 @@ import {
   listCSVFilterTasks,
   downloadCOSFile,
   getDownloadProgress,
+  listDownloads,
   TIDImportItem,
   COSFileInfo,
   CSVFilterTask,
@@ -49,6 +50,7 @@ interface TIDEntry {
 
 // DownloadTask 单个文件下载任务
 interface DownloadTask {
+  task_id: string;   // backend 返回的 task_id (即 cos_key)
   cos_key: string;
   file_name: string;
   progress: number;
@@ -80,20 +82,73 @@ const FilterTask: React.FC = () => {
   const [csvTasks, setCsvTasks] = useState<CSVFilterTask[]>([]);
   const [workerCount, setWorkerCount] = useState(4);
 
-  // 加载配置
+  // 加载配置 & 恢复下载任务
   useEffect(() => {
     getConfig().then(r => setWorkerCount(r.data.worker_count)).catch(() => {});
     loadCSVFilterTasks();
     loadCOSFiles();
+    // 从后端恢复进行中/已完成的下载任务
+    (async () => {
+      try {
+        const resp = await listDownloads();
+        const items: DownloadTask[] = resp.data.tasks.map(t => ({
+          task_id: t.task_id,
+          cos_key: t.task_id,
+          file_name: t.file_name,
+          progress: t.progress,
+          message: t.message,
+          done: t.done,
+          error: t.error || '',
+          local_path: t.local_path,
+        }));
+        if (items.length > 0) {
+          setDownloadTasks(items);
+        }
+      } catch (_) {}
+    })();
   }, []);
 
-  // 定时刷新运行中的任务
+  // 定时刷新运行中的 CSV 过滤任务
   useEffect(() => {
     const hasRunning = csvTasks.some(t => t.status === 'running' || t.status === 'pending' || t.status === 'resumed');
     if (!hasRunning) return;
     const timer = setInterval(loadCSVFilterTasks, 3000);
     return () => clearInterval(timer);
   }, [csvTasks]);
+
+  // 定时刷新进行中的 COS 下载任务（页面刷新后恢复下载进度）
+  useEffect(() => {
+    const ongoing = downloadTasks.filter(t => !t.done && !!t.task_id);
+    if (ongoing.length === 0) return;
+    const timer = setInterval(async () => {
+      try {
+        const results = await Promise.allSettled(
+          ongoing.map(t => getDownloadProgress(t.task_id))
+        );
+        setDownloadTasks(prev => {
+          const map = new Map(prev.map(t => [t.task_id, t]));
+          for (const r of results) {
+            if (r.status === 'fulfilled') {
+              const d = r.value.data;
+              const existing = map.get(d.task_id);
+              if (existing) {
+                map.set(d.task_id, {
+                  ...existing,
+                  progress: d.progress,
+                  message: d.message,
+                  done: d.done,
+                  error: d.error || '',
+                  local_path: d.local_path || existing.local_path,
+                });
+              }
+            }
+          }
+          return Array.from(map.values());
+        });
+      } catch (_) {}
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [downloadTasks]);
 
   const loadCSVFilterTasks = async () => {
     try {
@@ -171,6 +226,7 @@ const FilterTask: React.FC = () => {
 
     // 初始化下载任务列表
     const initTasks: DownloadTask[] = cosKeys.map(key => ({
+      task_id: '',  // startDownload 后补充
       cos_key: key,
       file_name: key.split('/').pop() || key,
       progress: 0,
@@ -198,6 +254,10 @@ const FilterTask: React.FC = () => {
         try {
           const startResp = await downloadCOSFile(cosKey, false);
           taskId = startResp.data.task_id;
+          // 保存后端返回的 task_id，以便页面刷新后恢复进度
+          setDownloadTasks(prev => prev.map((t, idx) =>
+            idx === i ? { ...t, task_id: taskId, local_path: startResp.data.local_path } : t
+          ));
         } catch (firstErr: any) {
           if (firstErr.response?.status === 409) {
             const doOverwrite = window.confirm(
@@ -206,6 +266,9 @@ const FilterTask: React.FC = () => {
             if (doOverwrite) {
               const startResp = await downloadCOSFile(cosKey, true);
               taskId = startResp.data.task_id;
+              setDownloadTasks(prev => prev.map((t, idx) =>
+                idx === i ? { ...t, task_id: taskId, local_path: startResp.data.local_path } : t
+              ));
             } else {
               const existingPath = firstErr.response.data.local_path;
               downloadedPaths.push(existingPath);
