@@ -14,6 +14,7 @@ import {
   Progress,
   Table,
   Tooltip,
+  Divider,
 } from 'antd';
 import {
   PlayCircleOutlined,
@@ -182,10 +183,19 @@ const CSVFilter: React.FC = () => {
       ),
     },
     {
-      title: '进度', dataIndex: 'pct', key: 'pct', width: 120,
+      title: '过滤进度', dataIndex: 'pct', key: 'pct', width: 100,
       render: (pct: number, record: CSVFilterTask) => {
         const p = record.status === 'done' ? 100 : pct || 0;
         return <Progress percent={p} size="small" style={{ margin: 0 }} />;
+      },
+    },
+    {
+      title: '导入进度', key: 'import_progress', width: 100,
+      render: (_: any, record: CSVFilterTask) => {
+        if (!record.import_status || record.import_status === '') return <Text type="secondary">-</Text>;
+        if (record.import_status === 'done') return <Progress percent={100} size="small" style={{ margin: 0 }} />;
+        if (record.import_status === 'failed') return <Progress percent={record.import_progress || 0} size="small" status="exception" style={{ margin: 0 }} />;
+        return <Progress percent={record.import_progress || 0} size="small" status="active" style={{ margin: 0 }} />;
       },
     },
     {
@@ -245,6 +255,34 @@ const CSVFilter: React.FC = () => {
         )}
         {record.error && (
           <Col span={24}><Alert type="error" message={record.error} banner style={{ fontSize: 12 }} /></Col>
+        )}
+        {/* 导入阶段详情 */}
+        {record.import_status && record.import_status !== '' && (
+          <>
+            <Col span={24}><Divider style={{ margin: '4px 0' }} /></Col>
+            <Col span={24}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                MySQL导入状态：
+                {record.import_status === 'importing' && <Tag color="processing" style={{ marginLeft: 4 }}>导入中</Tag>}
+                {record.import_status === 'done' && <Tag color="success" style={{ marginLeft: 4 }}>导入完成</Tag>}
+                {record.import_status === 'failed' && <Tag color="error" style={{ marginLeft: 4 }}>导入失败</Tag>}
+                {record.import_status === 'pending' && <Tag style={{ marginLeft: 4 }}>等待导入</Tag>}
+              </Text>
+            </Col>
+            <Col span={12}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                导入进度: <Text strong>{record.import_progress || 0}%</Text>
+              </Text>
+            </Col>
+            <Col span={12}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                已导入: <Text strong>{fmtNum(record.import_done)}</Text> / {fmtNum(record.import_total)} 条
+              </Text>
+            </Col>
+            {record.import_error && (
+              <Col span={24}><Alert type="error" message={record.import_error} banner style={{ fontSize: 12 }} /></Col>
+            )}
+          </>
         )}
       </Row>
     </div>

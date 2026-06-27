@@ -44,7 +44,7 @@ const (
 	CSVStatusResumed CSVTaskStatus = "resumed"
 )
 
-// CSVFilterTask 单个过滤任务的状态
+// CSVFilterTask 单个过滤任务的状态（含过滤+导入两个阶段）
 type CSVFilterTask struct {
 	ID         string        `json:"id"`
 	TarPath    string        `json:"tar_path"`
@@ -64,6 +64,13 @@ type CSVFilterTask struct {
 	Resumed   bool  `json:"resumed"`
 	Pct       int   `json:"pct"`
 
+	// 导入阶段
+	ImportStatus   CSVImportStatus `json:"import_status"`
+	ImportProgress int             `json:"import_progress"`
+	ImportTotal    int64           `json:"import_total"`
+	ImportDone     int64           `json:"import_done"`
+	ImportError    string          `json:"import_error,omitempty"`
+
 	SubmitOrder int64 `json:"submit_order"`
 
 	cancel chan struct{}
@@ -80,6 +87,8 @@ func (t *CSVFilterTask) Snapshot() CSVFilterTask {
 		LinesDone: t.LinesDone, RawLines: t.RawLines, KeptLines: t.KeptLines,
 		FirstTS: t.FirstTS, LastTS: t.LastTS, Resumed: t.Resumed,
 		Pct: t.Pct, SubmitOrder: t.SubmitOrder,
+		ImportStatus: t.ImportStatus, ImportProgress: t.ImportProgress,
+		ImportTotal: t.ImportTotal, ImportDone: t.ImportDone, ImportError: t.ImportError,
 	}
 }
 
@@ -95,6 +104,35 @@ func (t *CSVFilterTask) setError(err string) {
 	t.Status = CSVStatusFailed
 	t.Error = err
 	t.FinishedAt = time.Now().Unix()
+	t.mu.Unlock()
+}
+
+// setImportStatus 设置导入阶段状态
+func (t *CSVFilterTask) setImportStatus(s CSVImportStatus, pct int, done int64) {
+	t.mu.Lock()
+	t.ImportStatus = s
+	t.ImportProgress = pct
+	t.ImportDone = done
+	t.UpdatedAt = time.Now().Unix()
+	t.mu.Unlock()
+}
+
+// setImportProgress 更新导入进度
+func (t *CSVFilterTask) setImportProgress(pct int, total, done int64) {
+	t.mu.Lock()
+	t.ImportProgress = pct
+	t.ImportTotal = total
+	t.ImportDone = done
+	t.UpdatedAt = time.Now().Unix()
+	t.mu.Unlock()
+}
+
+// setImportError 设置导入失败
+func (t *CSVFilterTask) setImportError(err string) {
+	t.mu.Lock()
+	t.ImportStatus = CSVImportFailed
+	t.ImportError = err
+	t.UpdatedAt = time.Now().Unix()
 	t.mu.Unlock()
 }
 

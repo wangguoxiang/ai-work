@@ -273,6 +273,12 @@ export interface CSVFilterTask {
   resumed: boolean;
   pct: number;
   submit_order: number;
+  // 导入阶段
+  import_status: string;
+  import_progress: number;
+  import_total: number;
+  import_done: number;
+  import_error?: string;
 }
 
 // 提交CSV过滤任务

@@ -881,7 +881,7 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 		results = append(results, submittedTask{TarPath: tarPath, TaskID: t.ID, ResumedFrom: rf})
 	}
 
-	// 后台串行执行
+	// 后台串行执行（过滤 → 导入MySQL）
 	go func() {
 		for _, pt := range queue {
 			select {
@@ -891,7 +891,14 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 				continue
 			default:
 			}
+			// 第一阶段：CSV过滤
 			h.csvFilterMgr.RunTask(pt.t, segments, pt.prog)
+
+			// 第二阶段：过滤完成后自动导入临时MySQL数据库
+			if pt.t.Status == services.CSVStatusDone {
+				log.Printf("[任务管道] 过滤完成，开始导入MySQL: task=%s, output=%s", pt.t.ID, pt.t.OutputPath)
+				services.ImportSQLToTempDBWithTask(pt.t, pt.t.OutputPath)
+			}
 		}
 	}()
 

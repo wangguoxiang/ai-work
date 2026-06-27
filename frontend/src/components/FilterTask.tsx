@@ -13,6 +13,7 @@ import {
   Col,
   Checkbox,
   Progress,
+  Divider,
 } from 'antd';
 import {
   PlayCircleOutlined,
@@ -312,7 +313,7 @@ const FilterTask: React.FC = () => {
         tar_paths: downloadedPaths,
         csv_path: csvFilePath,
       });
-      message.success({ content: 'CSV过滤任务已创建，正在后台执行', key: 'filter_msg', duration: 3 });
+      message.success({ content: '管道任务已创建: 过滤中 → 完成后自动导入MySQL', key: 'filter_msg', duration: 5 });
       loadCSVFilterTasks();
     } catch (err: any) {
       const detail = err.response?.data?.error || err.message;
@@ -386,13 +387,21 @@ const FilterTask: React.FC = () => {
     },
     { title: '文件', dataIndex: 'tar_path', key: 'tar_path', ellipsis: true, width: 180,
       render: (v: string) => <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '-'}</Text> },
-    { title: '进度', dataIndex: 'pct', key: 'pct', width: 110,
+    { title: '过滤进度', dataIndex: 'pct', key: 'pct', width: 100,
       render: (pct: number, record: CSVFilterTask) => {
         const p = record.status === 'done' ? 100 : pct || 0;
         return <Progress percent={p} size="small" style={{ margin: 0 }} />;
       },
     },
-    { title: '保留/原始', key: 'stats', width: 110,
+    { title: '导入进度', key: 'import_progress', width: 100,
+      render: (_: any, record: CSVFilterTask) => {
+        if (!record.import_status || record.import_status === '') return <Text type="secondary">-</Text>;
+        if (record.import_status === 'done') return <Progress percent={100} size="small" style={{ margin: 0 }} />;
+        if (record.import_status === 'failed') return <Progress percent={record.import_progress || 0} size="small" status="exception" style={{ margin: 0 }} />;
+        return <Progress percent={record.import_progress || 0} size="small" status="active" style={{ margin: 0 }} />;
+      },
+    },
+    { title: '保留/原始', key: 'stats', width: 100,
       render: (_: any, record: CSVFilterTask) => (
         <Text style={{ fontSize: 12 }}>
           <Text style={{ color: '#16a34a', fontWeight: 600 }}>{fmtNum(record.kept_lines)}</Text>
@@ -491,7 +500,7 @@ const FilterTask: React.FC = () => {
               </Button>
             </div>
             <Alert style={{ marginTop: 12 }}
-              message="流程: 下载COS文件 → 按CSV绑定段过滤SQL → 输出过滤后的SQL文件" type="info" showIcon />
+              message="流程: 下载COS文件 → 按CSV绑定段过滤SQL → 导入过滤结果到临时MySQL数据库" type="info" showIcon />
           </Card>
 
           {/* 任务列表(CSV过滤任务) */}
@@ -535,6 +544,34 @@ const FilterTask: React.FC = () => {
                           )}
                           {record.error && (
                             <Col span={24}><Alert type="error" message={record.error} banner style={{ fontSize: 12 }} /></Col>
+                          )}
+                          {/* 导入阶段详情 */}
+                          {record.import_status && record.import_status !== '' && (
+                            <>
+                              <Col span={24}><Divider style={{ margin: '4px 0' }} /></Col>
+                              <Col span={24}>
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  MySQL导入状态：
+                                  {record.import_status === 'importing' && <Tag color="processing" style={{ marginLeft: 4 }}>导入中</Tag>}
+                                  {record.import_status === 'done' && <Tag color="success" style={{ marginLeft: 4 }}>导入完成</Tag>}
+                                  {record.import_status === 'failed' && <Tag color="error" style={{ marginLeft: 4 }}>导入失败</Tag>}
+                                  {record.import_status === 'pending' && <Tag style={{ marginLeft: 4 }}>等待导入</Tag>}
+                                </Text>
+                              </Col>
+                              <Col span={12}>
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  导入进度: <Text strong>{record.import_progress || 0}%</Text>
+                                </Text>
+                              </Col>
+                              <Col span={12}>
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  已导入: <Text strong>{fmtNum(record.import_done)}</Text> / {fmtNum(record.import_total)} 条
+                                </Text>
+                              </Col>
+                              {record.import_error && (
+                                <Col span={24}><Alert type="error" message={record.import_error} banner style={{ fontSize: 12 }} /></Col>
+                              )}
+                            </>
                           )}
                         </Row>
                       </div>
