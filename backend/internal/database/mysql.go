@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -119,24 +120,41 @@ func BatchInsert(db *sqlx.DB, tableName string, columns []string, data [][]inter
 	}
 	defer tx.Rollback()
 
-	// 构建批量插入SQL
-	colStr := ""
-	for i, col := range columns {
-		if i > 0 {
-			colStr += ", "
+	var stmt *sql.Stmt
+	if len(columns) > 0 {
+		// 有列名：INSERT INTO `table` (col1, col2) VALUES (?, ?)
+		colStr := ""
+		for i, col := range columns {
+			if i > 0 {
+				colStr += ", "
+			}
+			colStr += "`" + col + "`"
 		}
-		colStr += "`" + col + "`"
-	}
 
-	placeholders := ""
-	for i := 0; i < len(columns); i++ {
-		if i > 0 {
-			placeholders += ", "
+		placeholders := ""
+		for i := 0; i < len(columns); i++ {
+			if i > 0 {
+				placeholders += ", "
+			}
+			placeholders += "?"
 		}
-		placeholders += "?"
-	}
 
-	stmt, err := tx.Prepare(fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)", tableName, colStr, placeholders))
+		stmt, err = tx.Prepare(fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)", tableName, colStr, placeholders))
+	} else {
+		// 无列名：INSERT INTO `table` VALUES (?, ?, ?)  — 从第一条数据推断列数
+		colCount := len(data[0])
+		if colCount == 0 {
+			return fmt.Errorf("数据列数为0")
+		}
+		placeholders := ""
+		for i := 0; i < colCount; i++ {
+			if i > 0 {
+				placeholders += ", "
+			}
+			placeholders += "?"
+		}
+		stmt, err = tx.Prepare(fmt.Sprintf("INSERT INTO `%s` VALUES (%s)", tableName, placeholders))
+	}
 	if err != nil {
 		return err
 	}

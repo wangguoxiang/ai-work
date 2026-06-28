@@ -88,12 +88,16 @@ func ImportSQLToTempDB(sqlPath string, progressFn ImportProgressFn) error {
 		}
 
 		if insertRe.MatchString(trimmed) {
-			tableName, columns, rows := parseInsertStatement(trimmed)
-			if tableName == "" || len(rows) == 0 {
+			_, columns, rows := parseInsertStatement(trimmed)
+			if len(rows) == 0 {
 				continue
 			}
 
-			currentTable = tableName
+			// 始终使用配置的目标表名
+			currentTable = cfg.TempDB.Table
+			if currentTable == "" {
+				currentTable = "gps_archive_data"
+			}
 			currentColumns = columns
 			totalRows += int64(len(rows))
 
