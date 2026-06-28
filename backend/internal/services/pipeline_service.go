@@ -108,6 +108,9 @@ func (t *PipelineTask) setStage(stage PipelineStage) {
 	t.UpdatedAt = time.Now().Unix()
 	t.updateElapsed()
 	t.unlock()
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }
 
 func (t *PipelineTask) setError(err string) {
@@ -117,6 +120,9 @@ func (t *PipelineTask) setError(err string) {
 	t.UpdatedAt = time.Now().Unix()
 	t.updateElapsed()
 	t.unlock()
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }
 
 func (t *PipelineTask) updateElapsed() {
@@ -152,6 +158,9 @@ func (t *PipelineTask) recalcProgress() {
 	}
 	t.UpdatedAt = time.Now().Unix()
 	t.updateElapsed()
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }
 
 // ========== 管道任务管理器 ==========
@@ -198,6 +207,12 @@ func (pm *PipelineTaskManager) Create(req *PipelineCreateRequest) *PipelineTask 
 	}
 
 	pm.tasks[task.ID] = task
+
+	// 持久化
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
+
 	return task
 }
 
@@ -547,6 +562,9 @@ func (pm *PipelineTaskManager) updateDownloadItem(taskID string, idx int, fn fun
 		fn(&t.Downloads[idx])
 	}
 	t.unlock()
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }
 
 func (pm *PipelineTaskManager) updateTaskProgress(taskID string, fn func(t *PipelineTask)) {
@@ -559,6 +577,9 @@ func (pm *PipelineTaskManager) updateTaskProgress(taskID string, fn func(t *Pipe
 	t.lock()
 	fn(t)
 	t.unlock()
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }
 
 // 确保 os 包被使用

@@ -87,6 +87,7 @@ type AppConfig struct {
 	WorkerCount    int           `json:"worker_count"`
 	WiredTypes     []string      `json:"wired_types"`
 	TimezoneOffset int           `json:"timezone_offset"`
+	TaskDBFile     string        `json:"task_db_file,omitempty"`
 }
 
 // DBConfig 数据库配置
@@ -96,6 +97,7 @@ type DBConfig struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
 	DBName   string `json:"db_name"`
+	Table    string `json:"table,omitempty"`
 }
 
 // DSN 生成MySQL连接字符串
@@ -123,6 +125,7 @@ func DefaultConfig() AppConfig {
 			User:     "root",
 			Password: "",
 			DBName:   "gps_temp",
+			Table:    "gps_archive_data",
 		},
 		VehicleDB: DBConfig{
 			Host:     "127.0.0.1",
@@ -151,6 +154,7 @@ func DefaultConfig() AppConfig {
 		WorkDir:        "./work",
 		WorkerCount:    4,
 		TimezoneOffset: 8,
+		TaskDBFile:     "./work/task_db.json",
 		WiredTypes: []string{
 			"ZJ210W", "ZJ210", "ZJ220", "ZJ220S", "ZJ220R",
 			"ZJ220F(R)", "ZJ220F", "ZJ220F(D)", "IV100", "ZJ210B",

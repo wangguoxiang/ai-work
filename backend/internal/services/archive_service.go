@@ -109,7 +109,8 @@ func (as *ArchiveService) runFilterTask(ctx context.Context, taskID string, req 
 	defer tempDB.Close()
 
 	// 确保目标表存在
-	err = database.EnsureTempTable(tempDB, "gps_archive_data", as.getTableSchema())
+	tableName := as.getTableName()
+	err = database.EnsureTempTable(tempDB, tableName, as.getTableSchema(tableName))
 	if err != nil {
 		as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
 			t.Status = "failed"
@@ -394,6 +395,11 @@ func extractTableName(line string) string {
 	if len(matches) > 1 {
 		return matches[1]
 	}
+	// 从配置获取默认表名
+	cfg := config.Get()
+	if cfg.TempDB.Table != "" {
+		return cfg.TempDB.Table
+	}
 	return "gps_archive_data"
 }
 
@@ -586,9 +592,18 @@ func isTimeInRange(timeStr, startTime, endTime string) bool {
 	return (t.Equal(start) || t.After(start)) && (t.Equal(end) || t.Before(end))
 }
 
+// getTableName 获取临时表名（从配置读取）
+func (as *ArchiveService) getTableName() string {
+	cfg := config.Get()
+	if cfg.TempDB.Table != "" {
+		return cfg.TempDB.Table
+	}
+	return "gps_archive_data"
+}
+
 // getTableSchema 获取临时表结构
-func (as *ArchiveService) getTableSchema() string {
-	return `CREATE TABLE IF NOT EXISTS gps_archive_data (
+func (as *ArchiveService) getTableSchema(tableName string) string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		tid VARCHAR(64) NOT NULL,
 		gps_time DATETIME,
@@ -601,7 +616,7 @@ func (as *ArchiveService) getTableSchema() string {
 		INDEX idx_tid (tid),
 		INDEX idx_gps_time (gps_time),
 		INDEX idx_tid_time (tid, gps_time)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName)
 }
 
 // exportToSQLFiles 从临时数据库导出到SQL文件
@@ -637,7 +652,8 @@ func (as *ArchiveService) exportToSQLFiles(
 		})
 
 		// 查询该TID的所有数据
-		rows, err := tempDB.Queryx("SELECT * FROM gps_archive_data WHERE tid = ? ORDER BY gps_time ASC", tid)
+		tableName := as.getTableName()
+		rows, err := tempDB.Queryx(fmt.Sprintf("SELECT * FROM %s WHERE tid = ? ORDER BY gps_time ASC", tableName), tid)
 		if err != nil {
 			return fmt.Errorf("查询TID=%s数据失败: %w", tid, err)
 		}
@@ -687,7 +703,7 @@ func (as *ArchiveService) exportToSQLFiles(
 				if recordCount > 0 {
 					fmt.Fprintf(f, ";\n")
 				}
-				fmt.Fprintf(f, "INSERT INTO `gps_archive_data` (`%s`) VALUES\n", strings.Join(columns, "`, `"))
+				fmt.Fprintf(f, "INSERT INTO `%s` (`%s`) VALUES\n", tableName, strings.Join(columns, "`, `"))
 			} else {
 				fmt.Fprintf(f, ",\n")
 			}
@@ -862,7 +878,8 @@ func (as *ArchiveService) StartCOSPipeline(ctx context.Context, taskID string, r
 	defer tempDB.Close()
 	as.taskManager.AddLog(taskID, "  ✓ 数据库连接成功")
 
-	err = database.EnsureTempTable(tempDB, "gps_archive_data", as.getTableSchema())
+	tableName := as.getTableName()
+	err = database.EnsureTempTable(tempDB, tableName, as.getTableSchema(tableName))
 	if err != nil {
 		as.failTask(taskID, fmt.Sprintf("创建临时表失败: %v", err))
 		return

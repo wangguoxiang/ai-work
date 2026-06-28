@@ -43,8 +43,12 @@ func ImportSQLToTempDB(sqlPath string, progressFn ImportProgressFn) error {
 	defer db.Close()
 
 	// 2. 确保目标表存在
-	schema := getImportTableSchema()
-	err = database.EnsureTempTable(db, "gps_archive_data", schema)
+	tableName := cfg.TempDB.Table
+	if tableName == "" {
+		tableName = "gps_archive_data"
+	}
+	schema := getImportTableSchema(tableName)
+	err = database.EnsureTempTable(db, tableName, schema)
 	if err != nil {
 		return fmt.Errorf("创建临时表失败: %w", err)
 	}
@@ -182,8 +186,8 @@ func ImportSQLToTempDBWithTask(task *CSVFilterTask, sqlPath string) {
 
 // ========== 表结构 ==========
 
-func getImportTableSchema() string {
-	return `CREATE TABLE IF NOT EXISTS gps_archive_data (
+func getImportTableSchema(tableName string) string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		tid VARCHAR(64) NOT NULL,
 		gps_time DATETIME,
@@ -196,7 +200,7 @@ func getImportTableSchema() string {
 		INDEX idx_tid (tid),
 		INDEX idx_gps_time (gps_time),
 		INDEX idx_tid_time (tid, gps_time)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName)
 }
 
 // ========== INSERT 匹配器 ==========

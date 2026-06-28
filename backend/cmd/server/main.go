@@ -36,13 +36,19 @@ func main() {
 
 	// 创建服务
 	taskManager := services.NewTaskManager()
+	pipelineManager := services.NewPipelineTaskManager()
 	vehicleService := services.NewVehicleService()
 	archiveService := services.NewArchiveService(taskManager)
 	bindLogService := services.NewBindLogService()
 	cosService := services.NewCOSService()
 
+	// 初始化任务持久化存储（必须在创建 Handler 之前，以便恢复任务）
+	services.InitTaskStore(taskManager, pipelineManager)
+	services.LoadAndRestore(taskManager, pipelineManager)
+	log.Println("[TaskStore] 任务持久化存储已初始化")
+
 	// 创建处理器
-	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService, cosService)
+	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService, cosService, pipelineManager)
 
 	// 启动CSV过滤器管理器(自动恢复未完成任务)
 	csvFilterMgr := h.GetCSVFilterManager()

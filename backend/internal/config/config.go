@@ -99,6 +99,9 @@ func UpdatePartial(updates map[string]interface{}) error {
 	if v, ok := updates["worker_count"]; ok {
 		cfg.WorkerCount = toInt(v)
 	}
+	if v, ok := updates["task_db_file"]; ok {
+		cfg.TaskDBFile = toString(v)
+	}
 	if v, ok := updates["cos_config"]; ok {
 		if m, ok := v.(map[string]interface{}); ok {
 			if vv, ok := m["secret_id"]; ok {
@@ -138,6 +141,9 @@ func applyDBUpdate(db *models.DBConfig, updates map[string]interface{}) {
 	}
 	if v, ok := updates["db_name"]; ok {
 		db.DBName = toString(v)
+	}
+	if v, ok := updates["table"]; ok {
+		db.Table = toString(v)
 	}
 }
 

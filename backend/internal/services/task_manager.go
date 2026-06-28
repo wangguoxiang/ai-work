@@ -42,6 +42,12 @@ func (tm *TaskManager) CreateTask(req models.FilterTaskRequest) string {
 	}
 
 	tm.tasks[taskID] = task
+
+	// 持久化
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
+
 	return taskID
 }
 
@@ -61,6 +67,11 @@ func (tm *TaskManager) UpdateTask(taskID string, update func(*models.TaskStatus)
 				task.Elapsed = fmt.Sprintf("%.0f分%.0f秒", elapsed.Minutes(), float64(int64(elapsed.Seconds())%60))
 			}
 		}
+	}
+
+	// 持久化
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
 	}
 }
 
@@ -100,6 +111,11 @@ func (tm *TaskManager) AddLog(taskID, format string, args ...interface{}) {
 	if task, ok := tm.tasks[taskID]; ok {
 		task.Logs = append(task.Logs, entry)
 	}
+
+	// 持久化
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }
 
 // DeleteTask 删除任务
@@ -107,4 +123,9 @@ func (tm *TaskManager) DeleteTask(taskID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	delete(tm.tasks, taskID)
+
+	// 持久化
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
 }

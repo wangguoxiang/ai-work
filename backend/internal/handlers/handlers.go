@@ -32,7 +32,7 @@ type Handler struct {
 }
 
 // NewHandler 创建处理器
-func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *services.TaskManager, bls *services.BindLogService, cs *services.COSService) *Handler {
+func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *services.TaskManager, bls *services.BindLogService, cs *services.COSService, pm *services.PipelineTaskManager) *Handler {
 	return &Handler{
 		vehicleService: vs,
 		archiveService: as,
@@ -40,7 +40,7 @@ func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *se
 		bindLogService: bls,
 		cosService:     cs,
 		csvFilterMgr:   services.NewCSVFilterTaskManager(),
-		pipelineMgr:    services.NewPipelineTaskManager(),
+		pipelineMgr:    pm,
 	}
 }
 

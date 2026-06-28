@@ -4,7 +4,8 @@
     "port": 31306,
     "user": "root",
     "password": "520dbj-mysql666",
-    "db_name": "gps_temp"
+    "db_name": "gps_temp",
+    "table": "t_location"
   },
   "vehicle_db": {
     "host": "192.168.3.206",
@@ -32,6 +33,7 @@
   },
   "work_dir": "./work",
   "worker_count": 4,
+  "task_db_file": "./work/task_db.json",
   "wired_types": [
     "ZJ210W",
     "ZJ210",
