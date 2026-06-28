@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"gps-archive-tool/internal/config"
+	"gps-archive-tool/internal/database"
 )
 
 // ========== 管道阶段定义 ==========
@@ -454,6 +455,28 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		return
 	}
 	log.Printf("[管道 %s] CSV解析成功: %d 个TID", task.ID, len(segments))
+
+	// 在导入前重建临时表，确保表结构与当前 schema 一致
+	func() {
+		cfg := config.Get()
+		tableName := cfg.TempDB.Table
+		if tableName == "" {
+			tableName = "gps_archive_data"
+		}
+		// 使用 import_sql_service 中的 schema 定义
+		schema := getImportTableSchema(tableName)
+		db, connErr := database.Connect(cfg.TempDB)
+		if connErr != nil {
+			log.Printf("[管道 %s] 连接临时数据库失败(跳过建表): %v", task.ID, connErr)
+			return
+		}
+		defer db.Close()
+		if err := database.EnsureTempTableReplace(db, tableName, schema); err != nil {
+			log.Printf("[管道 %s] 重建临时表失败(跳过): %v", task.ID, err)
+		} else {
+			log.Printf("[管道 %s] 临时表 %s 已重建", task.ID, tableName)
+		}
+	}()
 
 	// 为每个 tar 文件创建过滤任务并串行执行
 	groupCancel := make(chan struct{})

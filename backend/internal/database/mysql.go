@@ -108,6 +108,19 @@ func EnsureTempTable(db *sqlx.DB, tableName string, schema string) error {
 	return nil
 }
 
+// EnsureTempTableReplace 删除并重新创建临时表（确保表结构与指定的 schema 一致）
+func EnsureTempTableReplace(db *sqlx.DB, tableName string, schema string) error {
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tableName))
+	if err != nil {
+		return fmt.Errorf("删除旧表失败: %w", err)
+	}
+	_, err = db.Exec(schema)
+	if err != nil {
+		return fmt.Errorf("创建表失败: %w", err)
+	}
+	return nil
+}
+
 // BatchInsert 批量插入数据
 func BatchInsert(db *sqlx.DB, tableName string, columns []string, data [][]interface{}) error {
 	if len(data) == 0 {
