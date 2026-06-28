@@ -333,6 +333,20 @@ func (pm *PipelineTaskManager) RunPipeline(
 	// ======== 阶段2: 过滤 + 导入 ========
 	pm.runFilterAndImportStage(task, filterMgr, downloadedPaths)
 	log.Printf("[管道 %s] 管道执行完毕", task.ID)
+
+	// 清理下载的 tar.gz 文件
+	pm.cleanupDownloadedFiles(task, downloadedPaths)
+}
+
+// cleanupDownloadedFiles 清理管道下载的 tar.gz 文件
+func (pm *PipelineTaskManager) cleanupDownloadedFiles(task *PipelineTask, paths []string) {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil {
+			log.Printf("[管道 %s] 清理下载文件失败: %s (%v)", task.ID, path, err)
+		} else {
+			log.Printf("[管道 %s] 已清理下载文件: %s", task.ID, path)
+		}
+	}
 }
 
 // runDownloadStage 执行下载阶段
@@ -473,7 +487,7 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		log.Printf("[管道 %s] 开始过滤文件: %s", task.ID, filepath.Base(tarPath))
 		filterMgr.RunTask(ft, segments, prog)
 
-		// 同步过滤状态（导入阶段在 filter_mgr.RunTask 后的 import_sql_service 中自动完成）
+		// 同步过滤状态
 		snap := ft.Snapshot()
 		task.lock()
 		task.FilterKeptLines = snap.KeptLines
@@ -491,6 +505,10 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 			task.setError(fmt.Sprintf("过滤失败: %s", snap.Error))
 			return
 		}
+
+		// 过滤成功，将过滤后的 SQL 文件导入临时 MySQL 数据库
+		log.Printf("[管道 %s] 过滤完成，开始导入MySQL: task=%s, output=%s", task.ID, ft.ID, ft.OutputPath)
+		ImportSQLToTempDBWithTask(ft, ft.OutputPath)
 
 		// 如果导入还在进行中，轮询等待完成
 		if snap.ImportStatus == CSVImportRunning {
