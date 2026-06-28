@@ -376,21 +376,8 @@ func parseInsertStatement(line string) (string, []string, [][]interface{}) {
 		if len(matches2) < 3 {
 			return "", nil, nil
 		}
-		// 没有列名信息 — 根据第一个元组推断列数，返回空列名（由调用方决定插入策略）
-		tableName := extractTableName(line)
-		valuesPart := matches2[len(matches2)-1]
-		// 先通过 splitTuples 获取第一个元组确定列数
-		tuples := splitTuples(valuesPart)
-		if len(tuples) == 0 {
-			return "", nil, nil
-		}
-		fields := tupleFields(tuples[0])
-		colCount := len(fields)
-		if colCount == 0 {
-			return "", nil, nil
-		}
-		rows := parseValues(valuesPart, colCount)
-		return tableName, nil, rows
+		// 没有列名信息，跳过（需要列名来匹配TID/时间）
+		return "", nil, nil
 	}
 
 	tableName := extractTableName(line)

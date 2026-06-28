@@ -1,12 +1,11 @@
 package services
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
-	"time"
 
 	"gps-archive-tool/internal/config"
 	"gps-archive-tool/internal/database"
@@ -31,118 +30,89 @@ const (
 type ImportProgressFn func(total, done int64)
 
 // ImportSQLToTempDB 将过滤后的 SQL 文件导入临时 MySQL 数据库
-// 读取 SQL 文件中的 INSERT 语句，解析并批量插入到 gps_archive_data 表
+// 通过 mysql 命令行客户端执行 source 命令来导入，避免 Go 解析 SQL 的兼容性问题
 func ImportSQLToTempDB(sqlPath string, progressFn ImportProgressFn) error {
 	cfg := config.Get()
 
-	// 1. 连接临时数据库
-	db, err := database.Connect(cfg.TempDB)
-	if err != nil {
-		return fmt.Errorf("连接临时数据库失败: %w", err)
-	}
-	defer db.Close()
-
-	// 2. 确保目标表存在
+	// 1. 确保目标表存在（通过 database/sql 创建）
 	tableName := cfg.TempDB.Table
 	if tableName == "" {
 		tableName = "gps_archive_data"
 	}
-	schema := getImportTableSchema(tableName)
-	err = database.EnsureTempTable(db, tableName, schema)
-	if err != nil {
-		return fmt.Errorf("创建临时表失败: %w", err)
+	func() {
+		db, err := database.Connect(cfg.TempDB)
+		if err != nil {
+			log.Printf("[SQL导入] 连接临时数据库失败(跳过建表): %v", err)
+			return
+		}
+		defer db.Close()
+		schema := getImportTableSchema(tableName)
+		if err := database.EnsureTempTable(db, tableName, schema); err != nil {
+			log.Printf("[SQL导入] 创建临时表失败(跳过): %v", err)
+		}
+	}()
+
+	// 2. 检查 SQL 文件是否存在
+	if _, err := os.Stat(sqlPath); os.IsNotExist(err) {
+		return fmt.Errorf("SQL文件不存在: %s", sqlPath)
 	}
 
-	// 3. 读取 SQL 文件，逐行解析 INSERT 语句
-	file, err := os.Open(sqlPath)
+	// 3. 通过 mysql 命令行客户端执行导入
+	log.Printf("[SQL导入] 开始通过 mysql CLI source 导入: %s", sqlPath)
+
+	// 获取文件大小用于进度报告
+	fileInfo, _ := os.Stat(sqlPath)
+	fileSize := int64(0)
+	if fileInfo != nil {
+		fileSize = fileInfo.Size()
+	}
+
+	// 报告初始进度
+	if progressFn != nil {
+		progressFn(fileSize, 0)
+	}
+
+	// 构造 mysql 命令
+	args := []string{
+		"-h", cfg.TempDB.Host,
+		"-P", fmt.Sprintf("%d", cfg.TempDB.Port),
+		"-u", cfg.TempDB.User,
+		fmt.Sprintf("-p%s", cfg.TempDB.Password),
+		cfg.TempDB.DBName,
+	}
+
+	cmd := exec.Command("mysql", args...)
+
+	f, err := os.Open(sqlPath)
 	if err != nil {
 		return fmt.Errorf("打开SQL文件失败: %w", err)
 	}
-	defer file.Close()
+	defer f.Close()
+	cmd.Stdin = f
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
-
-	// 匹配 INSERT 语句
-	insertRe := &insertMatcher{}
-
-	var (
-		batchRows      [][]interface{}
-		currentColumns []string
-		currentTable   string
-		maxBatchSize   = 500
-		totalRows      int64
-		importedRows   int64
-		lineCount      int64
-		lastReportTime = time.Now()
-	)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		lineCount++
-
-		// 跳过注释和空行
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "#") {
-			continue
+	// 捕获 stdout+stderr
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errMsg := strings.TrimSpace(string(output))
+		if errMsg == "" {
+			errMsg = err.Error()
 		}
-
-		if insertRe.MatchString(trimmed) {
-			_, columns, rows := parseInsertStatement(trimmed)
-			if len(rows) == 0 {
-				continue
-			}
-
-			// 始终使用配置的目标表名
-			currentTable = cfg.TempDB.Table
-			if currentTable == "" {
-				currentTable = "gps_archive_data"
-			}
-			currentColumns = columns
-			totalRows += int64(len(rows))
-
-			for _, row := range rows {
-				batchRows = append(batchRows, row)
-
-				if len(batchRows) >= maxBatchSize {
-					err := database.BatchInsert(db, currentTable, currentColumns, batchRows)
-					if err != nil {
-						return fmt.Errorf("批量插入失败(行 %d): %w", lineCount, err)
-					}
-					importedRows += int64(len(batchRows))
-					batchRows = batchRows[:0]
-
-					// 每 500ms 报告一次进度
-					if time.Since(lastReportTime) > 500*time.Millisecond {
-						if progressFn != nil {
-							progressFn(totalRows, importedRows)
-						}
-						lastReportTime = time.Now()
-					}
-				}
-			}
-		}
+		return fmt.Errorf("mysql source 导入失败: %s", errMsg)
 	}
 
-	// 插入剩余数据
-	if len(batchRows) > 0 {
-		err := database.BatchInsert(db, currentTable, currentColumns, batchRows)
-		if err != nil {
-			return fmt.Errorf("批量插入剩余数据失败: %w", err)
-		}
-		importedRows += int64(len(batchRows))
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取SQL文件失败: %w", err)
-	}
-
-	// 最终进度报告
+	// 报告完成进度
 	if progressFn != nil {
-		progressFn(totalRows, importedRows)
+		progressFn(fileSize, fileSize)
 	}
 
-	log.Printf("[SQL导入] 完成: 文件=%s, 总行数=%d, 导入行数=%d", sqlPath, totalRows, importedRows)
+	outputStr := strings.TrimSpace(string(output))
+	if outputStr != "" && len(outputStr) < 1024 {
+		log.Printf("[SQL导入] mysql 输出: %s", outputStr)
+	} else if outputStr != "" {
+		log.Printf("[SQL导入] mysql 输出: %d bytes", len(outputStr))
+	}
+
+	log.Printf("[SQL导入] source 导入完成: 文件=%s, 大小=%d bytes", sqlPath, fileSize)
 	return nil
 }
 
@@ -205,14 +175,4 @@ func getImportTableSchema(tableName string) string {
 		INDEX idx_gps_time (gps_time),
 		INDEX idx_tid_time (tid, gps_time)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName)
-}
-
-// ========== INSERT 匹配器 ==========
-
-// insertMatcher 轻量 INSERT 匹配器
-type insertMatcher struct{}
-
-func (m *insertMatcher) MatchString(s string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(s))
-	return strings.HasPrefix(upper, "INSERT")
 }
