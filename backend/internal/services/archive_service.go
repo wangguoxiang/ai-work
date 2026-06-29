@@ -108,17 +108,6 @@ func (as *ArchiveService) runFilterTask(ctx context.Context, taskID string, req 
 	}
 	defer tempDB.Close()
 
-	// 确保目标表存在
-	tableName := as.getTableName()
-	err = database.EnsureTempTable(tempDB, tableName, as.getTableSchema(tableName))
-	if err != nil {
-		as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
-			t.Status = "failed"
-			t.Error = fmt.Sprintf("创建临时表失败: %v", err)
-		})
-		return
-	}
-
 	// 步骤3: 解析归档文件并过滤导入临时数据库
 	as.taskManager.UpdateTask(taskID, func(t *models.TaskStatus) {
 		t.Status = "正在过滤并导入临时数据库..."
@@ -882,14 +871,6 @@ func (as *ArchiveService) StartCOSPipeline(ctx context.Context, taskID string, r
 	}
 	defer tempDB.Close()
 	as.taskManager.AddLog(taskID, "  ✓ 数据库连接成功")
-
-	tableName := as.getTableName()
-	err = database.EnsureTempTable(tempDB, tableName, as.getTableSchema(tableName))
-	if err != nil {
-		as.failTask(taskID, fmt.Sprintf("创建临时表失败: %v", err))
-		return
-	}
-	as.taskManager.AddLog(taskID, "  ✓ 临时表已就绪")
 
 	// 构建TID集合
 	tidSet := make(map[string]bool)
