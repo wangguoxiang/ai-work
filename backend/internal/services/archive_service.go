@@ -634,6 +634,7 @@ func (as *ArchiveService) exportToSQLFiles(
 		return fmt.Errorf("创建输出目录失败: %w", err)
 	}
 
+	cfg := config.Get()
 	as.taskManager.AddLog(taskID, "  📝 导出 %d 个TID的SQL文件到 %s", len(tids), outputDir)
 	totalTIDs := len(tids)
 	for idx, tid := range tids {
@@ -677,7 +678,11 @@ func (as *ArchiveService) exportToSQLFiles(
 		fmt.Fprintf(f, "-- GPS Archive Export - TID: %s\n", tid)
 		fmt.Fprintf(f, "-- Export Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 		fmt.Fprintf(f, "-- Total Records: %s\n\n", "?")
-		fmt.Fprintf(f, "USE `gps_archive_export`;\n\n")
+		// 切换到目标数据库（从配置读取，而非硬编码）
+		dbName := cfg.TempDB.DBName
+		if dbName != "" {
+			fmt.Fprintf(f, "USE `%s`;\n\n", dbName)
+		}
 
 		// 逐行读取并写入
 		recordCount := 0
