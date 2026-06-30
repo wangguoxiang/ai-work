@@ -21,6 +21,7 @@ type PipelineStage string
 
 const (
 	StagePending   PipelineStage = "pending"
+	StageWaiting   PipelineStage = "waiting"
 	StageDownload  PipelineStage = "downloading"
 	StageFilter    PipelineStage = "filtering"
 	StageImport    PipelineStage = "importing"
@@ -139,7 +140,7 @@ func (t *PipelineTask) updateElapsed() {
 // recalcProgress 重新计算整体进度
 func (t *PipelineTask) recalcProgress() {
 	switch t.Status {
-	case StagePending:
+	case StagePending, StageWaiting:
 		t.Progress = 0
 	case StageDownload:
 		// 下载占 0~50%
@@ -168,14 +169,26 @@ func (t *PipelineTask) recalcProgress() {
 
 // PipelineTaskManager 管理所有管道任务
 type PipelineTaskManager struct {
-	mu    sync.RWMutex
-	tasks map[string]*PipelineTask
+	mu         sync.RWMutex
+	tasks      map[string]*PipelineTask
+	maxWorkers int             // 最大并行任务数
+	workerSem  chan struct{}   // 信号量：限制并发执行数
+	waitQueue  []*PipelineTask // 等待队列（FIFO）
+	cosSvc     *COSService
+	filterMgr  *CSVFilterTaskManager
 }
 
-// NewPipelineTaskManager 创建管理器
+// NewPipelineTaskManager 创建管理器（从配置读取 worker_count 作为并发上限）
 func NewPipelineTaskManager() *PipelineTaskManager {
+	cfg := config.Get()
+	maxWorkers := cfg.WorkerCount
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
 	return &PipelineTaskManager{
-		tasks: make(map[string]*PipelineTask),
+		tasks:      make(map[string]*PipelineTask),
+		maxWorkers: maxWorkers,
+		workerSem:  make(chan struct{}, maxWorkers),
 	}
 }
 
@@ -308,6 +321,70 @@ type PipelineCreateRequest struct {
 }
 
 // ========== 管道执行 ==========
+
+// Launch 尝试启动管道任务。
+// 若当前运行数 < maxWorkers，立即执行；否则加入等待队列。
+func (pm *PipelineTaskManager) Launch(
+	task *PipelineTask,
+	cosService *COSService,
+	filterMgr *CSVFilterTaskManager,
+) {
+	pm.mu.Lock()
+	pm.cosSvc = cosService
+	pm.filterMgr = filterMgr
+	pm.mu.Unlock()
+
+	// 尝试获取一个信号量槽位（非阻塞）
+	select {
+	case pm.workerSem <- struct{}{}:
+		// 获取到槽位，立即执行
+		task.setStage(StageDownload)
+		go pm.runPipelineAndRelease(task, cosService, filterMgr)
+	default:
+		// 已达到并发上限，加入等待队列
+		pm.mu.Lock()
+		task.setStage(StageWaiting)
+		pm.waitQueue = append(pm.waitQueue, task)
+		pm.mu.Unlock()
+		log.Printf("[管道 %s] 并发任务数已达上限(%d)，加入等待队列(队列长度=%d)",
+			task.ID, pm.maxWorkers, len(pm.waitQueue))
+	}
+}
+
+// runPipelineAndRelease 执行管道任务，完成后释放信号量并调度下一个等待任务
+func (pm *PipelineTaskManager) runPipelineAndRelease(
+	task *PipelineTask,
+	cosService *COSService,
+	filterMgr *CSVFilterTaskManager,
+) {
+	// 执行管道（同步阻塞）
+	pm.RunPipeline(task, cosService, filterMgr)
+
+	// 释放信号量
+	<-pm.workerSem
+
+	// 检查等待队列，调度下一个任务
+	pm.scheduleNext(cosService, filterMgr)
+}
+
+// scheduleNext 从等待队列取出最早的任务并执行
+func (pm *PipelineTaskManager) scheduleNext(cosService *COSService, filterMgr *CSVFilterTaskManager) {
+	pm.mu.Lock()
+	if len(pm.waitQueue) == 0 {
+		pm.mu.Unlock()
+		return
+	}
+	next := pm.waitQueue[0]
+	pm.waitQueue = pm.waitQueue[1:]
+	pm.mu.Unlock()
+
+	// 获取信号量槽位（此时一定有空闲槽位）
+	pm.workerSem <- struct{}{}
+
+	log.Printf("[管道 %s] 从等待队列取出执行，剩余队列长度=%d", next.ID, len(pm.waitQueue))
+	next.setStage(StageDownload)
+	go pm.runPipelineAndRelease(next, cosService, filterMgr)
+}
 
 // RunPipeline 在后台执行完整的管道任务
 func (pm *PipelineTaskManager) RunPipeline(

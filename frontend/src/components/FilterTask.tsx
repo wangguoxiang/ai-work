@@ -27,6 +27,7 @@ import {
   DownloadOutlined,
   FilterOutlined,
   DatabaseOutlined,
+  ClockCircleOutlined,
 } from '@ant-design/icons';
 import {
   getConfig,
@@ -73,10 +74,10 @@ const FilterTask: React.FC = () => {
     loadCOSFiles();
   }, []);
 
-  // 定时刷新管道任务（自动覆盖下载/过滤/导入所有阶段）
+  // 定时刷新管道任务（自动覆盖下载/过滤/导入所有阶段 + 等待队列）
   useEffect(() => {
     const hasRunning = pipelineTasks.some(t =>
-      t.status === 'downloading' || t.status === 'filtering' || t.status === 'importing'
+      t.status === 'downloading' || t.status === 'filtering' || t.status === 'importing' || t.status === 'waiting'
     );
     if (!hasRunning) return;
     const timer = setInterval(loadPipelines, 2000);
@@ -145,6 +146,7 @@ const FilterTask: React.FC = () => {
   const getPipelineStatusTag = (status: string) => {
     const m: Record<string, { label: string; color: string }> = {
       pending: { label: '等待', color: 'default' },
+      waiting: { label: '排队中', color: 'orange' },
       downloading: { label: '下载中', color: 'processing' },
       filtering: { label: '过滤中', color: 'processing' },
       importing: { label: '导入中', color: 'processing' },
@@ -289,7 +291,13 @@ const FilterTask: React.FC = () => {
 
           {/* 管道任务列表（统一显示整体进度和子任务进度） */}
           <Card title={<span>📊 管道任务进度</span>} style={{ marginBottom: 16 }}
-            extra={<Button size="small" icon={<ReloadOutlined />} onClick={loadPipelines}>刷新</Button>}>
+            extra={
+              <Space>
+                {pipelineTasks.filter(t => t.status === 'waiting').length > 0 &&
+                  <Tag color="orange">排队中: {pipelineTasks.filter(t => t.status === 'waiting').length}</Tag>}
+                <Button size="small" icon={<ReloadOutlined />} onClick={loadPipelines}>刷新</Button>
+              </Space>
+            }>
             {pipelineTasks.length === 0
               ? <Text type="secondary">暂无管道任务</Text>
               : <div style={{ maxHeight: 600, overflow: 'auto' }}>
@@ -301,6 +309,16 @@ const FilterTask: React.FC = () => {
                           {getPipelineStatusTag(task.status)}
                         </Space>
                       }>
+                      {/* 等待队列中的任务不显示进度详情 */}
+                      {task.status === 'waiting' ? (
+                        <div style={{ textAlign: 'center', padding: '12px 0' }}>
+                          <ClockCircleOutlined style={{ fontSize: 24, color: '#fa8c16' }} />
+                          <div style={{ marginTop: 8 }}>
+                            <Text type="secondary">排队等待中，当前有 {pipelineTasks.filter(t => t.status === 'downloading' || t.status === 'filtering' || t.status === 'importing').length} 个任务正在执行</Text>
+                          </div>
+                        </div>
+                      ) : (
+                      <>
                       {/* 整体进度 */}
                       <div style={{ marginBottom: 10 }}>
                         <Text strong style={{ fontSize: 13 }}>整体进度 {task.progress}%</Text>
@@ -374,6 +392,8 @@ const FilterTask: React.FC = () => {
                           )}
                         </div>
                       </details>
+                      </>
+                      )}
                     </Card>
                   ))}
                 </div>

@@ -857,8 +857,8 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 	}
 	task := h.pipelineMgr.Create(pipelineReq)
 
-	// 后台异步执行
-	go h.pipelineMgr.RunPipeline(task, h.cosService, h.csvFilterMgr)
+	// 后台异步执行（受并发限制）
+	h.pipelineMgr.Launch(task, h.cosService, h.csvFilterMgr)
 
 	log.Printf("[管道] 创建: id=%s, cos文件数=%d, TIDs=%d", task.ID, len(req.COSKeys), len(req.TIDs))
 
