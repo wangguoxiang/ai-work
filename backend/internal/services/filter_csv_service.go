@@ -136,6 +136,17 @@ func (t *CSVFilterTask) setImportError(err string) {
 	t.mu.Unlock()
 }
 
+// setImportDone 设置导入完成（保留当前的 ImportTotal 作为 ImportDone）
+func (t *CSVFilterTask) setImportDone(total int64) {
+	t.mu.Lock()
+	t.ImportStatus = CSVImportDone
+	t.ImportProgress = 100
+	t.ImportDone = total
+	t.ImportTotal = total
+	t.UpdatedAt = time.Now().Unix()
+	t.mu.Unlock()
+}
+
 // ========== 进度持久化 ==========
 
 // CSVProgressFile 进度持久化文件

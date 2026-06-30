@@ -107,6 +107,7 @@ func (t *PipelineTask) setStage(stage PipelineStage) {
 	t.Status = stage
 	t.UpdatedAt = time.Now().Unix()
 	t.updateElapsed()
+	t.recalcProgress()
 	t.unlock()
 	if store := GetTaskStore(); store != nil {
 		store.MarkDirty()

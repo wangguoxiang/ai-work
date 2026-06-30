@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"os"
@@ -115,18 +116,29 @@ func ImportSQLToTempDBWithTask(task *CSVFilterTask, sqlPath string) {
 	task.setImportStatus(CSVImportRunning, 0, 0)
 	log.Printf("[SQL导入] 开始: task=%s, file=%s", task.ID, sqlPath)
 
+	// 统计 INSERT 行数用于更有意义的进度展示
+	totalLines := countInsertLines(sqlPath)
+	log.Printf("[SQL导入] 统计: %s, INSERT语句数=%d", sqlPath, totalLines)
+
+	// 初始化进度（总行数）
+	pct := 0
+	task.setImportProgress(pct, totalLines, 0)
+
 	err := ImportSQLToTempDB(sqlPath, func(total, done int64) {
-		pct := 0
+		// total/done 是文件字节数，这里用总行数换算进度
+		p := 0
 		if total > 0 {
-			pct = int(done * 100 / total)
+			p = int(done * 100 / total)
 		}
-		if pct < 0 {
-			pct = 0
+		if p < 0 {
+			p = 0
 		}
-		if pct > 100 {
-			pct = 100
+		if p > 100 {
+			p = 100
 		}
-		task.setImportProgress(pct, total, done)
+		// 换算成按行数的进度
+		lineDone := totalLines * int64(p) / 100
+		task.setImportProgress(p, totalLines, lineDone)
 	})
 
 	if err != nil {
@@ -135,11 +147,37 @@ func ImportSQLToTempDBWithTask(task *CSVFilterTask, sqlPath string) {
 		return
 	}
 
-	task.setImportStatus(CSVImportDone, 100, 0)
-	log.Printf("[SQL导入] 完成: task=%s, output=%s", task.ID, sqlPath)
+	task.setImportDone(totalLines)
+	log.Printf("[SQL导入] 完成: task=%s, output=%s, 已导入 %d 条INSERT", task.ID, sqlPath, totalLines)
 }
 
 // ========== 表结构 ==========
+
+// countInsertLines 统计 SQL 文件中 INSERT 语句的行数（用于进度展示）
+func countInsertLines(path string) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 1024*1024)
+	// 使用 4MB max line size 以支持超长 INSERT
+	scanner.Buffer(buf, 4*1024*1024)
+
+	var count int64
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToUpper(line), "INSERT") {
+			count++
+		}
+	}
+	return count
+}
 
 func getImportTableSchema(tableName string) string {
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
