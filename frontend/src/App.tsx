@@ -9,6 +9,7 @@ import {
   ApiOutlined,
   LinkOutlined,
   FilterOutlined,
+  EnvironmentOutlined,
 } from '@ant-design/icons';
 import VehicleQuery from './components/VehicleQuery';
 import ConfigPanel from './components/ConfigPanel';
@@ -16,6 +17,7 @@ import FilterTask from './components/FilterTask';
 import TaskList from './components/TaskList';
 import BindLogQuery from './components/BindLogQuery';
 import CSVFilter from './components/CSVFilter';
+import ReverseGeo from './components/ReverseGeo';
 
 const { Header, Content } = Layout;
 const { Title } = Typography;
@@ -54,6 +56,11 @@ const App: React.FC = () => {
       children: <TaskList />,
     },
     {
+      key: 'reversegeo',
+      label: <><EnvironmentOutlined /> 逆地址转换</>,
+      children: <ReverseGeo />,
+    },
+    {
       key: 'config',
       label: '🛠️ 系统配置',
       children: <ConfigPanel onSaved={handleConfigSaved} />,
@@ -65,7 +72,7 @@ const App: React.FC = () => {
       <Header className="app-header">
         <ApiOutlined className="header-icon" />
         <Title level={4} style={{ color: '#fff', margin: '0 0 0 12px' }}>
-          GPS归档数据过滤工具 · 设备绑定流水查询
+          GPS归档数据过滤工具 · 逆地址转换
         </Title>
       </Header>
       <Content className="app-content">

@@ -122,6 +122,14 @@ func main() {
 		api.POST("/pipeline/create", h.CreatePipeline)
 		api.GET("/pipeline/task/:taskId", h.GetPipeline)
 		api.GET("/pipeline/tasks", h.ListPipelines)
+
+		// 逆地址转换(天地图)
+		api.POST("/reversegeo/upload", h.UploadReverseGeoCSV)
+		api.POST("/reversegeo/start", h.StartReverseGeo)
+		api.GET("/reversegeo/task/:taskId", h.GetReverseGeoTask)
+		api.GET("/reversegeo/tasks", h.ListReverseGeoTasks)
+		api.POST("/reversegeo/cancel/:taskId", h.CancelReverseGeoTask)
+		api.GET("/reversegeo/download", h.DownloadReverseGeoFile)
 	}
 
 	// 优雅关闭

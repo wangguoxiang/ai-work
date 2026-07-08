@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: '/ehi2/api',
+  baseURL: '/api',
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
@@ -390,6 +390,110 @@ export interface CreatePipelineRequest {
 // 创建管道任务
 export const createPipeline = (req: CreatePipelineRequest) =>
   api.post<{ task_id: string; status: string; message: string }>('/pipeline/create', req);
+
+// ============ 逆地址转换（天地图） ============
+
+export interface ReverseGeoUploadResponse {
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  headers: string[];
+  detected: {
+    lng_col: string;
+    lat_col: string;
+    addr_col: string;
+    speed_col: string;
+  };
+}
+
+export type ReverseGeoStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface ReverseGeoResult {
+  row: number;
+  lng: string;
+  lat: string;
+  speed?: string;
+  address: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface ReverseGeoTask {
+  id: string;
+  file_name: string;
+  file_path: string;
+  output_dir: string;
+  output_files?: string[];
+  status: ReverseGeoStatus;
+  error?: string;
+  total_rows: number;
+  done_rows: number;
+  lng_col: string;
+  lat_col: string;
+  addr_col: string;
+  speed_col: string;
+  headers: string[];
+  results: ReverseGeoResult[];
+  created_at: number;
+  updated_at: number;
+  finished_at?: number;
+}
+
+export interface ReverseGeoTaskSummary {
+  id: string;
+  file_name: string;
+  status: ReverseGeoStatus;
+  total_rows: number;
+  done_rows: number;
+  created_at: number;
+  finished_at?: number;
+  error?: string;
+  pct: number;
+}
+
+export interface ReverseGeoStartResponse {
+  task_id: string;
+  message: string;
+  status: string;
+}
+
+// 上传CSV文件用于逆地址转换
+export const uploadReverseGeoCSV = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post<ReverseGeoUploadResponse>('/reversegeo/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  });
+};
+
+// 启动逆地址转换任务
+export const startReverseGeo = (filePath: string, lngCol?: string, latCol?: string, addrCol?: string) =>
+  api.post<ReverseGeoStartResponse>('/reversegeo/start', {
+    file_path: filePath,
+    lng_col: lngCol,
+    lat_col: latCol,
+    addr_col: addrCol,
+  });
+
+// 获取逆地址转换任务状态
+export const getReverseGeoTask = (taskId: string) =>
+  api.get<{ task: ReverseGeoTask }>(`/reversegeo/task/${taskId}`);
+
+// 列出所有逆地址转换任务
+export const listReverseGeoTasks = () =>
+  api.get<{ total: number; tasks: ReverseGeoTaskSummary[] }>('/reversegeo/tasks');
+
+// 取消逆地址转换任务
+export const cancelReverseGeoTask = (taskId: string) =>
+  api.post(`/reversegeo/cancel/${taskId}`);
+
+// 获取逆地址转换结果文件下载URL
+export const getReverseGeoDownloadUrl = (filePath: string) => {
+  // 直接用 baseURL 拼接，因为需要浏览器直接访问
+  const base = '/ehi2/api';
+  return `${base}/reversegeo/download?file=${encodeURIComponent(filePath)}`;
+};
 
 // 获取单个管道任务
 export const getPipeline = (taskId: string) =>

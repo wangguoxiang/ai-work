@@ -29,6 +29,7 @@ type Handler struct {
 	cosService     *services.COSService
 	csvFilterMgr   *services.CSVFilterTaskManager
 	pipelineMgr    *services.PipelineTaskManager
+	reverseGeoMgr  *services.ReverseGeoManager
 }
 
 // NewHandler 创建处理器
@@ -41,6 +42,7 @@ func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *se
 		cosService:     cs,
 		csvFilterMgr:   services.NewCSVFilterTaskManager(),
 		pipelineMgr:    pm,
+		reverseGeoMgr:  services.NewReverseGeoManager(),
 	}
 }
 
@@ -1042,4 +1044,203 @@ func (h *Handler) QueryTIDHistory(c *gin.Context) {
 		"tid":    req.TID,
 		"status": fmt.Sprintf("TID %s 查询成功", req.TID),
 	})
+}
+
+// ========== 逆地址转换（天地图）API ==========
+
+// ReverseGeoUploadReq 逆地址转换上传请求
+type ReverseGeoUploadReq struct {
+	LngCol  string `json:"lng_col" form:"lng_col"`
+	LatCol  string `json:"lat_col" form:"lat_col"`
+	AddrCol string `json:"addr_col" form:"addr_col"`
+}
+
+// UploadReverseGeoCSV 上传 CSV 文件用于逆地址转换
+func (h *Handler) UploadReverseGeoCSV(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV文件: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	if header == nil || !strings.HasSuffix(strings.ToLower(header.Filename), ".csv") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV格式文件(.csv)"})
+		return
+	}
+
+	cfg := config.Get()
+	uploadDir := filepath.Join(cfg.WorkDir, "uploads")
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建上传目录失败: " + err.Error()})
+		return
+	}
+
+	saveName := fmt.Sprintf("reverse_%d_%s", time.Now().Unix(), header.Filename)
+	savePath := filepath.Join(uploadDir, saveName)
+
+	out, err := os.Create(savePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败: " + err.Error()})
+		return
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, file); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "写入文件失败: " + err.Error()})
+		return
+	}
+
+	// 解析 CSV 表头返回给前端
+	headers, _, err := services.ParseCSVHeaders(savePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "解析CSV失败: " + err.Error()})
+		return
+	}
+
+	lngCol, latCol, addrCol, speedCol, _, _, _, _ := services.DetectColumns(headers)
+
+	c.JSON(http.StatusOK, gin.H{
+		"file_name": header.Filename,
+		"file_path": savePath,
+		"file_size": header.Size,
+		"headers":   headers,
+		"detected": gin.H{
+			"lng_col":   lngCol,
+			"lat_col":   latCol,
+			"addr_col":  addrCol,
+			"speed_col": speedCol,
+		},
+	})
+}
+
+// StartReverseGeo 开始逆地址转换任务
+func (h *Handler) StartReverseGeo(c *gin.Context) {
+	var req struct {
+		FilePath string `json:"file_path" binding:"required"`
+		LngCol   string `json:"lng_col"`
+		LatCol   string `json:"lat_col"`
+		AddrCol  string `json:"addr_col"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+
+	// 检查文件是否存在
+	if _, err := os.Stat(req.FilePath); os.IsNotExist(err) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文件不存在: " + req.FilePath})
+		return
+	}
+
+	// 获取文件名
+	fileName := filepath.Base(req.FilePath)
+
+	// 创建任务
+	task := h.reverseGeoMgr.CreateTask(req.FilePath, fileName)
+
+	// 异步执行
+	go h.reverseGeoMgr.RunReverseGeoTask(task.ID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"task_id": task.ID,
+		"message": "逆地址转换任务已启动",
+		"status":  task.Status,
+	})
+}
+
+// GetReverseGeoTask 获取逆地址转换任务状态
+func (h *Handler) GetReverseGeoTask(c *gin.Context) {
+	taskID := c.Param("taskId")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 不能为空"})
+		return
+	}
+
+	task, ok := h.reverseGeoMgr.GetTask(taskID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		return
+	}
+
+	view := task.View()
+	// 只返回最近 100 条结果
+	results := view.Results
+	if len(results) > 100 {
+		results = results[len(results)-100:]
+	}
+	view.Results = results
+
+	c.JSON(http.StatusOK, gin.H{
+		"task": view,
+	})
+}
+
+// ListReverseGeoTasks 列出所有逆地址转换任务
+func (h *Handler) ListReverseGeoTasks(c *gin.Context) {
+	tasks := h.reverseGeoMgr.ListTasks()
+	// 只返回摘要信息（用 map 避免复制含 Mutex 的结构体）
+	type taskSummary struct {
+		ID         string                    `json:"id"`
+		FileName   string                    `json:"file_name"`
+		Status     services.ReverseGeoStatus `json:"status"`
+		TotalRows  int                       `json:"total_rows"`
+		DoneRows   int                       `json:"done_rows"`
+		CreatedAt  int64                     `json:"created_at"`
+		FinishedAt int64                     `json:"finished_at,omitempty"`
+		Error      string                    `json:"error,omitempty"`
+		Pct        int                       `json:"pct"`
+	}
+	summaries := make([]taskSummary, 0, len(tasks))
+	for _, t := range tasks {
+		v := t.View()
+		pct := 0
+		if v.TotalRows > 0 {
+			pct = int(float64(v.DoneRows) / float64(v.TotalRows) * 100)
+		}
+		summaries = append(summaries, taskSummary{
+			ID: v.ID, FileName: v.FileName, Status: v.Status,
+			TotalRows: v.TotalRows, DoneRows: v.DoneRows,
+			CreatedAt: v.CreatedAt, FinishedAt: v.FinishedAt,
+			Error: v.Error, Pct: pct,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total": len(summaries),
+		"tasks": summaries,
+	})
+}
+
+// CancelReverseGeoTask 取消逆地址转换任务
+func (h *Handler) CancelReverseGeoTask(c *gin.Context) {
+	taskID := c.Param("taskId")
+	h.reverseGeoMgr.CancelTask(taskID)
+	c.JSON(http.StatusOK, gin.H{"message": "取消请求已发送"})
+}
+
+// DownloadReverseGeoFile 下载逆地址转换结果文件
+func (h *Handler) DownloadReverseGeoFile(c *gin.Context) {
+	filePath := c.Query("file")
+	if filePath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file 参数不能为空"})
+		return
+	}
+
+	// 安全检查：防止目录穿越
+	cleanPath := filepath.Clean(filePath)
+	if strings.Contains(cleanPath, "..") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "非法的文件路径"})
+		return
+	}
+
+	// 检查文件是否存在
+	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
+		return
+	}
+
+	fileName := filepath.Base(cleanPath)
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+	c.File(cleanPath)
 }
