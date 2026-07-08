@@ -296,12 +296,7 @@ func (t *PipelineTask) syncImportProgress() {
 			t.ImportError = snap.ImportError
 		}
 
-		if snap.ImportStatus == CSVImportDone {
-			t.Status = StageCompleted
-			t.Progress = 100
-		} else if snap.ImportStatus == CSVImportRunning {
-			t.Status = StageImport
-		} else if snap.ImportStatus == CSVImportFailed {
+		if snap.ImportStatus == CSVImportFailed {
 			t.ImportError = snap.ImportError
 		}
 	}
@@ -522,7 +517,6 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 	filterMgr *CSVFilterTaskManager,
 	tarPaths []string,
 ) {
-	task.setStage(StageFilter)
 	log.Printf("[管道 %s] 开始过滤: %d 个文件", task.ID, len(tarPaths))
 
 	// 读取 CSV 获取绑定段
@@ -536,6 +530,8 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 	// 为每个 tar 文件创建过滤任务并串行执行
 	groupCancel := make(chan struct{})
 	for _, tarPath := range tarPaths {
+		// 每个文件开始处理前重置为过滤阶段（确保多文件时进度不会卡在100%）
+		task.setStage(StageFilter)
 		select {
 		case <-groupCancel:
 			task.setError("管道已取消")
@@ -585,17 +581,11 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		}
 
 		// 过滤成功，将过滤后的 SQL 文件导入临时 MySQL 数据库
+		task.setStage(StageImport)
 		log.Printf("[管道 %s] 过滤完成，开始导入MySQL: task=%s, output=%s", task.ID, ft.ID, ft.OutputPath)
 		ImportSQLToTempDBWithTask(ft, ft.OutputPath)
 
-		// 如果导入还在进行中，轮询等待完成
-		if snap.ImportStatus == CSVImportRunning {
-			task.setStage(StageImport)
-			log.Printf("[管道 %s] 导入进行中, 等待完成...", task.ID)
-			waitForImportDone(filterMgr, ft.ID, task)
-		}
-
-		// 最终状态检查
+		// 最终状态检查并更新进度
 		task.lock()
 		snap2 := ft.Snapshot()
 		task.ImportStatus = string(snap2.ImportStatus)
@@ -605,6 +595,7 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		if snap2.ImportError != "" {
 			task.ImportError = snap2.ImportError
 		}
+		task.recalcProgress()
 		task.unlock()
 
 		if snap2.ImportStatus == CSVImportFailed {
