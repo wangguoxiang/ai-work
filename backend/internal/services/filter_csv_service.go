@@ -56,6 +56,10 @@ type CSVFilterTask struct {
 	UpdatedAt  int64         `json:"updated_at"`
 	FinishedAt int64         `json:"finished_at,omitempty"`
 
+	// 过滤列配置(0 表示使用默认值: device_id=2, timestamp=18)
+	DeviceIDCol  int `json:"device_id_col,omitempty"`
+	TimestampCol int `json:"timestamp_col,omitempty"`
+
 	LinesDone int64 `json:"lines_done"`
 	RawLines  int64 `json:"raw_lines"`
 	KeptLines int64 `json:"kept_lines"`
@@ -84,12 +88,29 @@ func (t *CSVFilterTask) Snapshot() CSVFilterTask {
 		ID: t.ID, TarPath: t.TarPath, CSVPath: t.CSVPath, OutputPath: t.OutputPath,
 		Status: t.Status, Error: t.Error,
 		StartedAt: t.StartedAt, UpdatedAt: t.UpdatedAt, FinishedAt: t.FinishedAt,
+		DeviceIDCol: t.DeviceIDCol, TimestampCol: t.TimestampCol,
 		LinesDone: t.LinesDone, RawLines: t.RawLines, KeptLines: t.KeptLines,
 		FirstTS: t.FirstTS, LastTS: t.LastTS, Resumed: t.Resumed,
 		Pct: t.Pct, SubmitOrder: t.SubmitOrder,
 		ImportStatus: t.ImportStatus, ImportProgress: t.ImportProgress,
 		ImportTotal: t.ImportTotal, ImportDone: t.ImportDone, ImportError: t.ImportError,
 	}
+}
+
+// deviceIDColIdx 返回实际使用的 device id 列索引(默认 colTID=2)
+func (t *CSVFilterTask) deviceIDColIdx() int {
+	if t.DeviceIDCol > 0 {
+		return t.DeviceIDCol
+	}
+	return colTID
+}
+
+// timestampColIdx 返回实际使用的时间戳列索引(默认 colTimestamp=18)
+func (t *CSVFilterTask) timestampColIdx() int {
+	if t.TimestampCol > 0 {
+		return t.TimestampCol
+	}
+	return colTimestamp
 }
 
 func (t *CSVFilterTask) setStatus(s CSVTaskStatus) {
@@ -157,12 +178,17 @@ type CSVProgressFile struct {
 	CSVPath    string `json:"csv_path"`
 	CSVHash    string `json:"csv_hash"`
 	OutputPath string `json:"output_path"`
-	LinesDone  int64  `json:"lines_done"`
-	RawLines   int64  `json:"raw_lines"`
-	KeptLines  int64  `json:"kept_lines"`
-	FirstTS    int64  `json:"first_ts"`
-	LastTS     int64  `json:"last_ts"`
-	UpdatedAt  int64  `json:"updated_at"`
+
+	// 过滤列配置(用于断点续传时保持一致的列位置)
+	DeviceIDCol  int `json:"device_id_col,omitempty"`
+	TimestampCol int `json:"timestamp_col,omitempty"`
+
+	LinesDone int64 `json:"lines_done"`
+	RawLines  int64 `json:"raw_lines"`
+	KeptLines int64 `json:"kept_lines"`
+	FirstTS   int64 `json:"first_ts"`
+	LastTS    int64 `json:"last_ts"`
+	UpdatedAt int64 `json:"updated_at"`
 }
 
 func csvProgressPath(outputPath string) string {
@@ -221,8 +247,11 @@ func NewCSVFilterTaskManager() *CSVFilterTaskManager {
 	return &CSVFilterTaskManager{tasks: make(map[string]*CSVFilterTask)}
 }
 
-func csvTaskID(tarPath, csvPath string) string {
-	return fmt.Sprintf("%x", simpleHash(tarPath+"|"+csvPath))
+func csvTaskID(tarPath, csvPath string, deviceIDCol int) string {
+	if deviceIDCol <= 0 {
+		deviceIDCol = colTID
+	}
+	return fmt.Sprintf("%x", simpleHash(tarPath+"|"+csvPath+"|"+strconv.Itoa(deviceIDCol)))
 }
 
 func simpleHash(s string) uint64 {
@@ -283,12 +312,28 @@ func (t *CSVFilterTask) SetError(err string) {
 	t.setError(err)
 }
 
+// SubmitOpts 过滤列配置选项
+type SubmitOpts struct {
+	DeviceIDCol  int // device id 在 INSERT VALUES 中的列索引(0-based), 0=默认2
+	TimestampCol int // 时间戳列索引, 0=默认18
+}
+
 // Submit 提交新任务
-func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, restart bool, groupCancel chan struct{}) (*CSVFilterTask, error) {
+func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, restart bool, groupCancel chan struct{}, opts ...SubmitOpts) (*CSVFilterTask, error) {
 	if outputPath == "" {
 		outputPath = csvDefaultOutputPath(tarPath)
 	}
-	id := csvTaskID(tarPath, csvPath)
+	deviceIDCol := colTID
+	timestampCol := colTimestamp
+	if len(opts) > 0 {
+		if opts[0].DeviceIDCol > 0 {
+			deviceIDCol = opts[0].DeviceIDCol
+		}
+		if opts[0].TimestampCol > 0 {
+			timestampCol = opts[0].TimestampCol
+		}
+	}
+	id := csvTaskID(tarPath, csvPath, deviceIDCol)
 
 	m.mu.Lock()
 	if existing, ok := m.tasks[id]; ok && (existing.Status == CSVStatusRunning || existing.Status == CSVStatusPending) {
@@ -307,6 +352,7 @@ func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, resta
 	t := &CSVFilterTask{
 		ID: id, TarPath: tarPath, CSVPath: csvPath, OutputPath: outputPath,
 		Status: CSVStatusPending, StartedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
+		DeviceIDCol: deviceIDCol, TimestampCol: timestampCol,
 		cancel:      cancelCh,
 		SubmitOrder: m.order,
 	}
@@ -473,6 +519,127 @@ func parseDateTimeToUnix(s string) (int64, error) {
 	return 0, fmt.Errorf("无法解析日期时间: %s", s)
 }
 
+// ReadDeviceIDCSV 读取 device id 列表 CSV,返回 map[deviceID][]CSVSegment
+// 支持两种格式:
+//
+//	格式A(带表头): device_id(或 id/sn), bind_ts(可选), unbind_ts(可选) — 自动按列名查找
+//	格式B(无表头): 第一列即 device id
+//
+// 当 CSV 中不包含 bind_ts/unbind_ts 列时,每个 device id 生成 BindTS=0/UnbindTS=0 的段,
+// 匹配该设备的所有记录(不过滤时间)。
+func ReadDeviceIDCSV(path string) (map[string][]CSVSegment, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开 CSV 失败: %w", err)
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	r.TrimLeadingSpace = true
+	r.LazyQuotes = true
+	r.FieldsPerRecord = -1
+	all, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("解析 CSV 失败: %w", err)
+	}
+	if len(all) == 0 {
+		return nil, fmt.Errorf("CSV 为空")
+	}
+
+	// 检测表头与各列索引
+	var idIdx, bindTsIdx, unbindTsIdx int
+	hasHeader := false
+	hasTimeCols := false
+
+	firstRow := all[0]
+	headerMap := make(map[string]int)
+	for i, col := range firstRow {
+		clean := strings.TrimSpace(strings.ToLower(col))
+		clean = strings.TrimLeft(clean, "\ufeff\u00a0")
+		headerMap[clean] = i
+	}
+
+	// 设备ID列优先级: device_id > deviceid > id > sn
+	if idx, ok := headerMap["device_id"]; ok {
+		idIdx, hasHeader = idx, true
+	} else if idx, ok := headerMap["deviceid"]; ok {
+		idIdx, hasHeader = idx, true
+	} else if idx, ok := headerMap["id"]; ok {
+		idIdx, hasHeader = idx, true
+	} else if idx, ok := headerMap["sn"]; ok {
+		idIdx, hasHeader = idx, true
+	}
+
+	if !hasHeader {
+		// 无表头:第一列即 device id;若首行首列看起来像表头关键字则跳过
+		idIdx = 0
+		head := strings.ToLower(strings.TrimSpace(all[0][0]))
+		if head == "device_id" || head == "deviceid" || head == "id" || head == "sn" {
+			hasHeader = true
+		}
+	}
+
+	if hasHeader {
+		if idx, ok := headerMap["bind_ts"]; ok {
+			bindTsIdx, hasTimeCols = idx, true
+		} else if idx, ok := headerMap["bind_time"]; ok {
+			bindTsIdx, hasTimeCols = idx, true
+		}
+		if idx, ok := headerMap["unbind_ts"]; ok {
+			unbindTsIdx = idx
+		} else if idx, ok := headerMap["unbind_time"]; ok {
+			unbindTsIdx = idx
+		}
+	}
+
+	dataStart := 0
+	if hasHeader {
+		dataStart = 1
+	}
+
+	segments := make(map[string][]CSVSegment)
+	for _, row := range all[dataStart:] {
+		if len(row) <= idIdx {
+			continue
+		}
+		devID := strings.TrimSpace(row[idIdx])
+		devID = strings.Trim(devID, "'\"")
+		if devID == "" {
+			continue
+		}
+		if !hasTimeCols {
+			// 只有 device id 列表:匹配该设备所有记录
+			segments[devID] = append(segments[devID], CSVSegment{BindTS: 0, UnbindTS: 0})
+			continue
+		}
+		if len(row) <= bindTsIdx {
+			continue
+		}
+		bt, err1 := strconv.ParseInt(strings.TrimSpace(row[bindTsIdx]), 10, 64)
+		if err1 != nil {
+			bt, err1 = parseDateTimeToUnix(row[bindTsIdx])
+			if err1 != nil {
+				continue
+			}
+		}
+		ubt := int64(0)
+		if unbindTsIdx < len(row) && strings.TrimSpace(row[unbindTsIdx]) != "" {
+			ubt, err = strconv.ParseInt(strings.TrimSpace(row[unbindTsIdx]), 10, 64)
+			if err != nil {
+				ubt, err = parseDateTimeToUnix(row[unbindTsIdx])
+				if err != nil {
+					ubt = 0
+				}
+			}
+		}
+		segments[devID] = append(segments[devID], CSVSegment{BindTS: bt, UnbindTS: ubt})
+	}
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("CSV 中未解析到有效 device id")
+	}
+	return segments, nil
+}
+
 // ========== SQL 解析核心函数 ==========
 
 func segmentOverlaps(ts int64, segs []CSVSegment) bool {
@@ -596,7 +763,8 @@ func extractValuesPart(line string) (head, valuesPart string, ok bool) {
 }
 
 // FilterLine 解析单行,返回新行/原始数/保留数/首ts/末ts
-func FilterLine(line string, segments map[string][]CSVSegment, preSkipped map[string]bool) (newLine string, lineRaw, lineKept int, firstTS, lastTS int64) {
+// deviceIDCol / tsCol 为 INSERT VALUES 中设备ID列和时间戳列的索引(0-based)
+func FilterLine(line string, segments map[string][]CSVSegment, preSkipped map[string]bool, deviceIDCol, tsCol int) (newLine string, lineRaw, lineKept int, firstTS, lastTS int64) {
 	head, valuesPart, ok := extractValuesPart(line)
 	if !ok {
 		return line, 0, 0, 0, 0
@@ -606,19 +774,22 @@ func FilterLine(line string, segments map[string][]CSVSegment, preSkipped map[st
 	for _, t := range tuples {
 		fields := tupleFields(t)
 		lineRaw++
-		if len(fields) <= colTimestamp {
+		if len(fields) <= tsCol {
 			continue
 		}
-		ts, err := strconv.ParseInt(strings.TrimSpace(fields[colTimestamp]), 10, 64)
+		ts, err := strconv.ParseInt(strings.TrimSpace(fields[tsCol]), 10, 64)
 		if err != nil {
 			continue
 		}
 		lastTS = ts
-		tid := stripSQLQuotes(fields[colTID])
-		if preSkipped != nil && preSkipped[tid] {
+		devID := ""
+		if deviceIDCol < len(fields) {
+			devID = stripSQLQuotes(fields[deviceIDCol])
+		}
+		if preSkipped != nil && preSkipped[devID] {
 			continue
 		}
-		segs, exists := segments[tid]
+		segs, exists := segments[devID]
 		if !exists || !segmentOverlaps(ts, segs) {
 			continue
 		}
@@ -690,7 +861,26 @@ func gzipBaseName(path string) string {
 func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]CSVSegment, prog *CSVProgressFile) {
 	t.setStatus(CSVStatusRunning)
 	startTime := time.Now()
-	log.Printf("[CSV过滤] 开始 tar=%s csv=%s output=%s", t.TarPath, t.CSVPath, t.OutputPath)
+	log.Printf("[CSV过滤] 开始 tar=%s csv=%s output=%s (device_id列=%d, 时间戳列=%d)",
+		t.TarPath, t.CSVPath, t.OutputPath, t.deviceIDColIdx(), t.timestampColIdx())
+
+	// 进度文件列配置不一致时(例如同一 tar+csv 换了过滤列)忽略旧进度,从头开始
+	if prog != nil {
+		progDevCol := prog.DeviceIDCol
+		progTsCol := prog.TimestampCol
+		if progDevCol <= 0 {
+			progDevCol = colTID
+		}
+		if progTsCol <= 0 {
+			progTsCol = colTimestamp
+		}
+		if progDevCol != t.deviceIDColIdx() || progTsCol != t.timestampColIdx() {
+			log.Printf("[CSV过滤] 进度文件列配置不一致(device_id %d->%d, ts %d->%d), 重新开始",
+				progDevCol, t.deviceIDColIdx(), progTsCol, t.timestampColIdx())
+			prog = nil
+			clearCSVProgress(t.OutputPath)
+		}
+	}
 
 	var resumeFrom int64
 	if prog != nil {
@@ -752,6 +942,7 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 	curProg := &CSVProgressFile{
 		TarPath: t.TarPath, TarSize: tarStat.Size(), TarMTime: tarStat.ModTime().Unix(),
 		CSVPath: t.CSVPath, OutputPath: t.OutputPath,
+		DeviceIDCol: t.DeviceIDCol, TimestampCol: t.TimestampCol,
 		LinesDone: linesDone, RawLines: rawLines, KeptLines: keptLines,
 		FirstTS: firstTS, LastTS: lastTS,
 	}
@@ -819,7 +1010,7 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 			if !isInsert(trimmed) {
 				continue
 			}
-			newLine, lr, lk, fTS, lTS := FilterLine(trimmed, segments, nil)
+			newLine, lr, lk, fTS, lTS := FilterLine(trimmed, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
 			if fTS != 0 {
 				firstTS = fTS
 			}
@@ -921,7 +1112,7 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 			go func(idx int, l string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				nl, raw, kept, _, lTS := FilterLine(l, segments, nil)
+				nl, raw, kept, _, lTS := FilterLine(l, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
 				results[idx] = lineResult{newLine: nl, raw: raw, kept: kept, lastTS: lTS}
 			}(i, line)
 		}
@@ -1069,7 +1260,7 @@ func (m *CSVFilterTaskManager) ResumeOnStartup(dir string) {
 			return nil
 		}
 
-		id := csvTaskID(p.TarPath, p.CSVPath)
+		id := csvTaskID(p.TarPath, p.CSVPath, p.DeviceIDCol)
 		m.mu.Lock()
 		if _, exists := m.tasks[id]; exists {
 			m.mu.Unlock()
@@ -1078,6 +1269,7 @@ func (m *CSVFilterTaskManager) ResumeOnStartup(dir string) {
 		t := &CSVFilterTask{
 			ID: id, TarPath: p.TarPath, CSVPath: p.CSVPath, OutputPath: p.OutputPath,
 			Status: CSVStatusPending, StartedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
+			DeviceIDCol: p.DeviceIDCol, TimestampCol: p.TimestampCol,
 			cancel:    make(chan struct{}),
 			LinesDone: p.LinesDone, RawLines: p.RawLines, KeptLines: p.KeptLines,
 			FirstTS: p.FirstTS, LastTS: p.LastTS, Resumed: p.LinesDone > 0,
@@ -1087,7 +1279,14 @@ func (m *CSVFilterTaskManager) ResumeOnStartup(dir string) {
 		log.Printf("[CSV过滤 恢复] 恢复任务 %s: %s (已写入 %d 行)", id, p.TarPath, p.LinesDone)
 
 		go func(pp CSVProgressFile, tt *CSVFilterTask) {
-			segs, err := ReadCSV(pp.CSVPath)
+			// 按进度文件记录的列配置选择对应的 CSV 解析器
+			var segs map[string][]CSVSegment
+			var err error
+			if pp.DeviceIDCol > 0 {
+				segs, err = ReadDeviceIDCSV(pp.CSVPath)
+			} else {
+				segs, err = ReadCSV(pp.CSVPath)
+			}
 			if err != nil {
 				tt.setError("CSV 解析失败: " + err.Error())
 				return

@@ -1,4 +1,18 @@
+# 依赖与构建产物
 frontend/node_modules/*
-work/*
-backend/config.json
 frontend/dist/*
+backend/*.exe
+backend/main
+backend/main.exe
+backend/gps-archive-tool.exe
+backend/gps-filter.exe
+
+# 运行时配置(含数据库/COS凭据, 不入库, 请基于 config.example.json 复制为 config.json)
+backend/config.json
+query_bind_list/config.json
+
+# 运行时数据目录
+work/*
+backend/work/*
+backend/data/*
+*.log

@@ -51,6 +51,9 @@ func Update(cfg models.AppConfig) error {
 	if cfg.VehicleDB.Password == "" && appConfig.VehicleDB.Password != "" {
 		cfg.VehicleDB.Password = appConfig.VehicleDB.Password
 	}
+	if cfg.KongCheDB.Password == "" && appConfig.KongCheDB.Password != "" {
+		cfg.KongCheDB.Password = appConfig.KongCheDB.Password
+	}
 	if cfg.COSConfig.SecretKey == "" && appConfig.COSConfig.SecretKey != "" {
 		cfg.COSConfig.SecretKey = appConfig.COSConfig.SecretKey
 	}
@@ -79,6 +82,11 @@ func UpdatePartial(updates map[string]interface{}) error {
 	if v, ok := updates["bind_log_db"]; ok {
 		if m, ok := v.(map[string]interface{}); ok {
 			applyBindLogDBUpdate(&cfg.BindLogDB, m)
+		}
+	}
+	if v, ok := updates["kongche_db"]; ok {
+		if m, ok := v.(map[string]interface{}); ok {
+			applyKongCheDBUpdate(&cfg.KongCheDB, m)
 		}
 	}
 	if v, ok := updates["wired_types"]; ok {
@@ -168,6 +176,45 @@ func applyBindLogDBUpdate(cfg *models.BindLogConfig, updates map[string]interfac
 	}
 	if v, ok := updates["sn_table"]; ok {
 		cfg.SNTable = toString(v)
+	}
+	if v, ok := updates["timeout"]; ok {
+		cfg.Timeout = toString(v)
+	}
+}
+
+func applyKongCheDBUpdate(cfg *models.KongCheDBConfig, updates map[string]interface{}) {
+	if v, ok := updates["host"]; ok {
+		cfg.Host = toString(v)
+	}
+	if v, ok := updates["port"]; ok {
+		cfg.Port = toInt(v)
+	}
+	if v, ok := updates["user"]; ok {
+		cfg.User = toString(v)
+	}
+	if v, ok := updates["password"]; ok {
+		cfg.Password = toString(v)
+	}
+	if v, ok := updates["db_name"]; ok {
+		cfg.DBName = toString(v)
+	}
+	if v, ok := updates["device_table"]; ok {
+		cfg.DeviceTable = toString(v)
+	}
+	if v, ok := updates["sn_col"]; ok {
+		cfg.SNCol = toString(v)
+	}
+	if v, ok := updates["device_id_col"]; ok {
+		cfg.DeviceIDCol = toString(v)
+	}
+	if v, ok := updates["cos_base_dir"]; ok {
+		cfg.COSBaseDir = toString(v)
+	}
+	if v, ok := updates["device_id_col_index"]; ok {
+		cfg.DeviceIDColIndex = toInt(v)
+	}
+	if v, ok := updates["timestamp_col_index"]; ok {
+		cfg.TimestampColIndex = toInt(v)
 	}
 	if v, ok := updates["timeout"]; ok {
 		cfg.Timeout = toString(v)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ type Handler struct {
 	archiveService *services.ArchiveService
 	taskManager    *services.TaskManager
 	bindLogService *services.BindLogService
+	kongCheService *services.KongCheService
 	cosService     *services.COSService
 	csvFilterMgr   *services.CSVFilterTaskManager
 	pipelineMgr    *services.PipelineTaskManager
@@ -33,12 +35,13 @@ type Handler struct {
 }
 
 // NewHandler 创建处理器
-func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *services.TaskManager, bls *services.BindLogService, cs *services.COSService, pm *services.PipelineTaskManager) *Handler {
+func NewHandler(vs *services.VehicleService, as *services.ArchiveService, tm *services.TaskManager, bls *services.BindLogService, kcs *services.KongCheService, cs *services.COSService, pm *services.PipelineTaskManager) *Handler {
 	return &Handler{
 		vehicleService: vs,
 		archiveService: as,
 		taskManager:    tm,
 		bindLogService: bls,
+		kongCheService: kcs,
 		cosService:     cs,
 		csvFilterMgr:   services.NewCSVFilterTaskManager(),
 		pipelineMgr:    pm,
@@ -91,6 +94,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	safeCfg.TempDB.Password = ""
 	safeCfg.VehicleDB.Password = ""
 	safeCfg.BindLogDB.Password = ""
+	safeCfg.KongCheDB.Password = ""
 	c.JSON(http.StatusOK, safeCfg)
 }
 
@@ -115,12 +119,16 @@ func (h *Handler) UpdateConfig(c *gin.Context) {
 	if _, ok := updates["bind_log_db"]; ok {
 		h.bindLogService.Reconnect()
 	}
+	if _, ok := updates["kongche_db"]; ok {
+		h.kongCheService.Reconnect()
+	}
 
 	cfg := config.Get()
 	safeCfg := cfg
 	safeCfg.TempDB.Password = ""
 	safeCfg.VehicleDB.Password = ""
 	safeCfg.BindLogDB.Password = ""
+	safeCfg.KongCheDB.Password = ""
 	c.JSON(http.StatusOK, safeCfg)
 }
 
@@ -140,12 +148,14 @@ func (h *Handler) SaveFullConfig(c *gin.Context) {
 
 	h.vehicleService.Reconnect()
 	h.bindLogService.Reconnect()
+	h.kongCheService.Reconnect()
 
 	cfg = config.Get()
 	safeCfg := cfg
 	safeCfg.TempDB.Password = ""
 	safeCfg.VehicleDB.Password = ""
 	safeCfg.BindLogDB.Password = ""
+	safeCfg.KongCheDB.Password = ""
 	c.JSON(http.StatusOK, safeCfg)
 }
 
@@ -438,9 +448,17 @@ func (h *Handler) ImportCSV(c *gin.Context) {
 }
 
 // ListCOSFiles 列出COS存储桶中的文件
+// 支持 ?base_dir=xxx 覆盖默认 base_dir(控车系统使用独立的目录前缀)
 func (h *Handler) ListCOSFiles(c *gin.Context) {
 	prefix := c.Query("prefix")
-	files, err := h.cosService.ListFiles(prefix)
+	baseDir := c.Query("base_dir")
+	var files []services.COSFileInfo
+	var err error
+	if baseDir != "" {
+		files, err = h.cosService.ListFilesWithBaseDir(prefix, baseDir)
+	} else {
+		files, err = h.cosService.ListFiles(prefix)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "列出COS文件失败: " + err.Error()})
 		return
@@ -905,6 +923,10 @@ type CSVFilterRequest struct {
 	CSVPath    string   `json:"csv_path" binding:"required"`
 	OutputPath string   `json:"output_path"`
 	Restart    bool     `json:"restart"`
+
+	// 过滤列配置(0 表示默认: device_id=2, timestamp=18; 控车为 1/3)
+	DeviceIDCol  int `json:"device_id_col"`
+	TimestampCol int `json:"timestamp_col"`
 }
 
 // StartCSVFilter 提交CSV过滤任务（tar_paths 需为已下载到本地的文件路径）
@@ -928,8 +950,14 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 		return
 	}
 
-	// 解析 CSV
-	segments, err := services.ReadCSV(req.CSVPath)
+	// 解析 CSV(控车模式: device_id 列表; 默认: tid 绑定段)
+	var segments map[string][]services.CSVSegment
+	var err error
+	if req.DeviceIDCol > 0 {
+		segments, err = services.ReadDeviceIDCSV(req.CSVPath)
+	} else {
+		segments, err = services.ReadCSV(req.CSVPath)
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV 解析失败: " + err.Error()})
 		return
@@ -969,7 +997,8 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 				prog = p
 			}
 		}
-		t, err := h.csvFilterMgr.Submit(tarPath, req.CSVPath, outputPath, req.Restart, groupCancel)
+		t, err := h.csvFilterMgr.Submit(tarPath, req.CSVPath, outputPath, req.Restart, groupCancel,
+			services.SubmitOpts{DeviceIDCol: req.DeviceIDCol, TimestampCol: req.TimestampCol})
 		if err != nil {
 			results = append(results, submittedTask{TarPath: tarPath, Error: err.Error()})
 			continue
@@ -1243,4 +1272,210 @@ func (h *Handler) DownloadReverseGeoFile(c *gin.Context) {
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
 	c.File(cleanPath)
+}
+
+// ========== 控车系统 API ==========
+
+// QueryKongCheDevices 查询控车系统设备(SN / device id)
+func (h *Handler) QueryKongCheDevices(c *gin.Context) {
+	var req models.KongCheQueryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.SN) == "" && strings.TrimSpace(req.DeviceID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少提供 SN 或 device id 作为查询条件"})
+		return
+	}
+	if req.Limit <= 0 {
+		req.Limit = 500
+	}
+
+	devices, total, err := h.kongCheService.QueryDevices(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询控车设备失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"sn":        req.SN,
+		"device_id": req.DeviceID,
+		"limit":     req.Limit,
+		"offset":    req.Offset,
+		"total":     total,
+		"count":     len(devices),
+		"devices":   devices,
+	})
+}
+
+// ExportKongCheDevices 导出控车设备为 CSV 文件(服务端生成,支持全量导出)
+// GET /api/kongche/export?sn=&device_id=
+func (h *Handler) ExportKongCheDevices(c *gin.Context) {
+	req := models.KongCheQueryRequest{
+		SN:       c.Query("sn"),
+		DeviceID: c.Query("device_id"),
+	}
+	if strings.TrimSpace(req.SN) == "" && strings.TrimSpace(req.DeviceID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少提供 SN 或 device id 作为查询条件"})
+		return
+	}
+
+	// 分批取全量(每批 5000),避免 limit 上限截断
+	const batch = 5000
+	var all []models.KongCheDevice
+	offset := 0
+	for {
+		req.Limit = batch
+		req.Offset = offset
+		devs, _, err := h.kongCheService.QueryDevices(req)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "导出控车设备失败: " + err.Error()})
+			return
+		}
+		all = append(all, devs...)
+		if len(devs) < batch {
+			break
+		}
+		offset += batch
+	}
+
+	// 生成 CSV(表头 device_id,sn,带 BOM 便于 Excel 打开)
+	var buf strings.Builder
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{"device_id", "sn"})
+	for _, d := range all {
+		_ = w.Write([]string{d.DeviceID, d.SN})
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成CSV失败: " + err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="kongche_device_export.csv"`)
+	c.String(http.StatusOK, "\ufeff"+buf.String())
+}
+
+// ImportKongCheCSV 导入控车 device id 列表 CSV 文件
+// 保存到服务器 work_dir/uploads/ 目录,返回 file_path 与解析出的 device id 列表
+func (h *Handler) ImportKongCheCSV(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV文件: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	if header == nil || !strings.HasSuffix(strings.ToLower(header.Filename), ".csv") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传CSV格式文件(.csv)"})
+		return
+	}
+
+	cfg := config.Get()
+	uploadDir := filepath.Join(cfg.WorkDir, "uploads")
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建上传目录失败: " + err.Error()})
+		return
+	}
+
+	saveName := fmt.Sprintf("kongche_%d_%s", time.Now().Unix(), header.Filename)
+	savePath := filepath.Join(uploadDir, saveName)
+
+	out, err := os.Create(savePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败: " + err.Error()})
+		return
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, file); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "写入文件失败: " + err.Error()})
+		return
+	}
+	log.Printf("[控车CSV导入] 已保存: %s (%d bytes)", savePath, header.Size)
+
+	// 解析 device id 列表
+	segments, err := services.ReadDeviceIDCSV(savePath)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV 解析失败: " + err.Error()})
+		return
+	}
+	ids := make([]string, 0, len(segments))
+	for id := range segments {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	c.JSON(http.StatusOK, gin.H{
+		"total":      len(ids),
+		"device_ids": ids,
+		"file_path":  savePath,
+		"file_name":  header.Filename,
+	})
+}
+
+// CreateKongChePipeline 创建控车管道任务
+// 流程: COS 下载 → 按 device id 过滤压缩数据 → 输出 SQL → 导入临时MySQL
+func (h *Handler) CreateKongChePipeline(c *gin.Context) {
+	var req struct {
+		COSKeys   []string `json:"cos_keys" binding:"required"`
+		DeviceIDs []string `json:"device_ids"`
+		CSVPath   string   `json:"csv_path" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	if len(req.COSKeys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少选择一个COS文件"})
+		return
+	}
+	if req.CSVPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请先导入 device id CSV 文件"})
+		return
+	}
+	if len(req.DeviceIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请先导入 device id 列表"})
+		return
+	}
+
+	// 预校验 CSV 可解析,快速失败(避免任务运行到过滤阶段才发现问题)
+	if _, err := services.ReadDeviceIDCSV(req.CSVPath); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "device id CSV 解析失败: " + err.Error()})
+		return
+	}
+
+	// 读取控车配置中的过滤列索引
+	cfg := config.Get()
+	kc := cfg.KongCheDB
+	deviceIDCol := kc.DeviceIDColIndex
+	if deviceIDCol <= 0 {
+		deviceIDCol = 1
+	}
+	timestampCol := kc.TimestampColIndex
+	if timestampCol <= 0 {
+		timestampCol = 3
+	}
+
+	pipelineReq := &services.PipelineCreateRequest{
+		COSKeys:      req.COSKeys,
+		TIDs:         req.DeviceIDs,
+		CSVPath:      req.CSVPath,
+		DeviceIDCol:  deviceIDCol,
+		TimestampCol: timestampCol,
+	}
+	task := h.pipelineMgr.Create(pipelineReq)
+
+	// 后台异步执行(受并发限制)
+	h.pipelineMgr.Launch(task, h.cosService, h.csvFilterMgr)
+
+	log.Printf("[控车管道] 创建: id=%s, cos文件数=%d, device_id数=%d, 过滤列(device_id=%d, ts=%d)",
+		task.ID, len(req.COSKeys), len(req.DeviceIDs), deviceIDCol, timestampCol)
+
+	c.JSON(http.StatusOK, gin.H{
+		"task_id": task.ID,
+		"status":  task.Status,
+		"message": "控车管道任务已创建，后台执行中",
+	})
 }

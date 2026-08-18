@@ -61,6 +61,10 @@ type PipelineTask struct {
 	PlateNos []string `json:"plate_nos"`
 	CSVPath  string   `json:"csv_path"`
 
+	// 过滤列配置(0 表示默认: device_id=2, timestamp=18; 控车为 1/3)
+	DeviceIDCol  int `json:"device_id_col,omitempty"`
+	TimestampCol int `json:"timestamp_col,omitempty"`
+
 	// 阶段1: 下载
 	Downloads        []FileDownloadInfo `json:"downloads"`
 	DownloadProgress int                `json:"download_progress"` // 0-100
@@ -95,6 +99,7 @@ func (t *PipelineTask) getSnapshot() PipelineTask {
 		ID: t.ID, Status: t.Status, Progress: t.Progress, Error: t.Error,
 		StartAt: t.StartAt, UpdatedAt: t.UpdatedAt, Elapsed: t.Elapsed,
 		COSKeys: t.COSKeys, TIDs: t.TIDs, VINs: t.VINs, PlateNos: t.PlateNos, CSVPath: t.CSVPath,
+		DeviceIDCol: t.DeviceIDCol, TimestampCol: t.TimestampCol,
 		Downloads: t.Downloads, DownloadProgress: t.DownloadProgress,
 		FilterStatus: t.FilterStatus, FilterProgress: t.FilterProgress,
 		FilterTaskID: t.FilterTaskID, FilterKeptLines: t.FilterKeptLines, FilterRawLines: t.FilterRawLines,
@@ -199,15 +204,17 @@ func (pm *PipelineTaskManager) Create(req *PipelineCreateRequest) *PipelineTask 
 
 	now := time.Now()
 	task := &PipelineTask{
-		ID:        uuid.New().String(),
-		Status:    StagePending,
-		StartAt:   now.Unix(),
-		UpdatedAt: now.Unix(),
-		COSKeys:   req.COSKeys,
-		TIDs:      req.TIDs,
-		VINs:      req.VINs,
-		PlateNos:  req.PlateNos,
-		CSVPath:   req.CSVPath,
+		ID:           uuid.New().String(),
+		Status:       StagePending,
+		StartAt:      now.Unix(),
+		UpdatedAt:    now.Unix(),
+		COSKeys:      req.COSKeys,
+		TIDs:         req.TIDs,
+		VINs:         req.VINs,
+		PlateNos:     req.PlateNos,
+		CSVPath:      req.CSVPath,
+		DeviceIDCol:  req.DeviceIDCol,
+		TimestampCol: req.TimestampCol,
 	}
 
 	// 初始化下载文件列表
@@ -313,6 +320,10 @@ type PipelineCreateRequest struct {
 	VINs     []string `json:"vins"`
 	PlateNos []string `json:"plate_nos"`
 	CSVPath  string   `json:"csv_path"`
+
+	// 过滤列配置(0 表示默认: device_id=2, timestamp=18; 控车为 1/3)
+	DeviceIDCol  int `json:"device_id_col,omitempty"`
+	TimestampCol int `json:"timestamp_col,omitempty"`
 }
 
 // ========== 管道执行 ==========
@@ -519,16 +530,29 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 ) {
 	log.Printf("[管道 %s] 开始过滤: %d 个文件", task.ID, len(tarPaths))
 
-	// 读取 CSV 获取绑定段
-	segments, err := ReadCSV(task.CSVPath)
+	// 读取 CSV 获取绑定段(控车模式用 ReadDeviceIDCSV 解析 device id 列表)
+	var segments map[string][]CSVSegment
+	var err error
+	if task.DeviceIDCol > 0 {
+		segments, err = ReadDeviceIDCSV(task.CSVPath)
+	} else {
+		segments, err = ReadCSV(task.CSVPath)
+	}
 	if err != nil {
 		task.setError(fmt.Sprintf("读取CSV失败: %v", err))
 		return
 	}
-	log.Printf("[管道 %s] CSV解析成功: %d 个TID", task.ID, len(segments))
+	log.Printf("[管道 %s] CSV解析成功: %d 个%s", task.ID, len(segments),
+		func() string {
+			if task.DeviceIDCol > 0 {
+				return " device id"
+			}
+			return "TID"
+		}())
 
 	// 为每个 tar 文件创建过滤任务并串行执行
 	groupCancel := make(chan struct{})
+	submitOpts := SubmitOpts{DeviceIDCol: task.DeviceIDCol, TimestampCol: task.TimestampCol}
 	for _, tarPath := range tarPaths {
 		// 每个文件开始处理前重置为过滤阶段（确保多文件时进度不会卡在100%）
 		task.setStage(StageFilter)
@@ -539,7 +563,7 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		default:
 		}
 
-		ft, err := filterMgr.Submit(tarPath, task.CSVPath, "", false, groupCancel)
+		ft, err := filterMgr.Submit(tarPath, task.CSVPath, "", false, groupCancel, submitOpts)
 		if err != nil {
 			task.setError(fmt.Sprintf("提交过滤任务失败: %v", err))
 			return

@@ -79,15 +79,37 @@ type COSConfig struct {
 
 // AppConfig 应用配置
 type AppConfig struct {
-	TempDB         DBConfig      `json:"temp_db"`
-	VehicleDB      DBConfig      `json:"vehicle_db"`
-	BindLogDB      BindLogConfig `json:"bind_log_db"`
-	COSConfig      COSConfig     `json:"cos_config"`
-	WorkDir        string        `json:"work_dir"`
-	WorkerCount    int           `json:"worker_count"`
-	WiredTypes     []string      `json:"wired_types"`
-	TimezoneOffset int           `json:"timezone_offset"`
-	TaskDBFile     string        `json:"task_db_file,omitempty"`
+	TempDB         DBConfig        `json:"temp_db"`
+	VehicleDB      DBConfig        `json:"vehicle_db"`
+	BindLogDB      BindLogConfig   `json:"bind_log_db"`
+	KongCheDB      KongCheDBConfig `json:"kongche_db"`
+	COSConfig      COSConfig       `json:"cos_config"`
+	WorkDir        string          `json:"work_dir"`
+	WorkerCount    int             `json:"worker_count"`
+	WiredTypes     []string        `json:"wired_types"`
+	TimezoneOffset int             `json:"timezone_offset"`
+	TaskDBFile     string          `json:"task_db_file,omitempty"`
+}
+
+// KongCheDBConfig 控车系统数据库配置
+// 设备表: positioning_travel.device (sn=SN序列号, id=device id)
+// 压缩数据表: mqtt_carstatus_position_log (VALUES 中 device_id 索引=1, create_time 索引=3)
+type KongCheDBConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	DBName   string `json:"db_name"` // 默认 positioning_travel
+
+	DeviceTable string `json:"device_table"`  // 设备表名, 默认 device
+	SNCol       string `json:"sn_col"`        // SN 列名, 默认 sn
+	DeviceIDCol string `json:"device_id_col"` // 设备ID列名, 默认 id
+	// 控车 COS 文件目录前缀(与 GPS 的 cos_config.base_dir 不同)
+	COSBaseDir string `json:"cos_base_dir"` // 默认 positioning_travel
+	// 压缩数据文件(SQL INSERT VALUES)中 device_id / create_time 的列索引(0-based)
+	DeviceIDColIndex  int    `json:"device_id_col_index"` // 默认 1
+	TimestampColIndex int    `json:"timestamp_col_index"` // 默认 3
+	Timeout           string `json:"timeout"`
 }
 
 // DBConfig 数据库配置
@@ -143,6 +165,20 @@ func DefaultConfig() AppConfig {
 			Table:    "t_bind_log",
 			SNTable:  "t_sn",
 			Timeout:  "10s",
+		},
+		KongCheDB: KongCheDBConfig{
+			Host:              "127.0.0.1",
+			Port:              3306,
+			User:              "root",
+			Password:          "",
+			DBName:            "positioning_travel",
+			DeviceTable:       "device",
+			SNCol:             "sn",
+			DeviceIDCol:       "id",
+			COSBaseDir:        "positioning_travel",
+			DeviceIDColIndex:  1,
+			TimestampColIndex: 3,
+			Timeout:           "10s",
 		},
 		COSConfig: COSConfig{
 			SecretID:  "",
@@ -202,4 +238,20 @@ type ArchiveFileInfo struct {
 	FileName string `json:"file_name"`
 	FilePath string `json:"file_path"`
 	FileSize int64  `json:"file_size"`
+}
+
+// ============ 控车系统设备查询 ============
+
+// KongCheDevice 控车系统设备(SN 与 device id)
+type KongCheDevice struct {
+	SN       string `json:"sn"`
+	DeviceID string `json:"device_id"`
+}
+
+// KongCheQueryRequest 控车设备查询请求
+type KongCheQueryRequest struct {
+	SN       string `json:"sn"`
+	DeviceID string `json:"device_id"`
+	Limit    int    `json:"limit"`  // 默认 500, 最大 5000
+	Offset   int    `json:"offset"` // 默认 0
 }

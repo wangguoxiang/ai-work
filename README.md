@@ -103,6 +103,14 @@ npm run build
 | GET | /api/filter/task/:taskId | 获取任务状态 |
 | GET | /api/filter/tasks | 列出所有任务 |
 | DELETE | /api/filter/task/:taskId | 删除任务 |
+| GET | /api/cos/files?base_dir= | 列出COS文件（可指定目录前缀） |
+| POST | /api/pipeline/create | 创建管道任务（下载→过滤→导入MySQL） |
+| GET | /api/pipeline/tasks | 列出管道任务 |
+| POST | /api/bindlog/query | 查询设备绑定流水 |
+| POST | /api/kongche/query | 控车设备查询（SN/device id，支持分页 limit/offset） |
+| GET | /api/kongche/export | 控车设备导出CSV（?sn=&device_id=） |
+| POST | /api/kongche/import-csv | 导入控车 device id CSV |
+| POST | /api/kongche/pipeline/create | 创建控车管道任务（按device id过滤） |
 
 ## ⚙️ 配置说明
 

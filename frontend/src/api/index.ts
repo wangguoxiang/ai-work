@@ -18,6 +18,21 @@ export interface DBConfig {
   db_name: string;
 }
 
+export interface KongCheDBConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  db_name: string;
+  device_table: string;
+  sn_col: string;
+  device_id_col: string;
+  cos_base_dir: string;
+  device_id_col_index: number;
+  timestamp_col_index: number;
+  timeout: string;
+}
+
 export interface COSConfig {
   secret_id: string;
   secret_key: string;
@@ -29,6 +44,8 @@ export interface COSConfig {
 export interface AppConfig {
   temp_db: DBConfig;
   vehicle_db: DBConfig;
+  bind_log_db: any;
+  kongche_db: KongCheDBConfig;
   cos_config: COSConfig;
   work_dir: string;
   worker_count: number;
@@ -218,9 +235,13 @@ export const importCSV = (file: File) => {
 // ============ COS存储桶 ============
 
 // 列出COS存储桶中的文件
-export const listCOSFiles = (prefix?: string) =>
+// baseDir: 可选, 覆盖配置中的默认 base_dir(控车系统使用独立的目录前缀)
+export const listCOSFiles = (prefix?: string, baseDir?: string) =>
   api.get<{ total: number; files: COSFileInfo[] }>('/cos/files', {
-    params: prefix ? { prefix } : {},
+    params: {
+      ...(prefix ? { prefix } : {}),
+      ...(baseDir ? { base_dir: baseDir } : {}),
+    },
   });
 
 // ============ COS过滤任务 ============
@@ -359,6 +380,8 @@ export interface PipelineTask {
   vins: string[];
   plate_nos: string[];
   csv_path: string;
+  device_id_col?: number;
+  timestamp_col?: number;
 
   // 下载阶段
   downloads: FileDownloadInfo[];
@@ -502,5 +525,56 @@ export const getPipeline = (taskId: string) =>
 // 获取所有管道任务列表
 export const listPipelines = () =>
   api.get<{ total: number; tasks: PipelineTask[] }>('/pipeline/tasks');
+
+// ============ 控车系统 (设备SN / device id) ============
+
+export interface KongCheDevice {
+  sn: string;
+  device_id: string;
+}
+
+export interface KongCheQueryRequest {
+  sn?: string;
+  device_id?: string;
+  limit?: number;
+}
+
+export interface KongCheQueryResponse {
+  sn: string;
+  device_id: string;
+  total: number;
+  devices: KongCheDevice[];
+}
+
+export interface KongCheImportResponse {
+  total: number;
+  device_ids: string[];
+  file_path: string;
+  file_name: string;
+}
+
+export interface CreateKongChePipelineRequest {
+  cos_keys: string[];
+  device_ids: string[];
+  csv_path: string;
+}
+
+// 查询控车系统设备(SN / device id 模糊匹配)
+export const queryKongCheDevices = (req: KongCheQueryRequest) =>
+  api.post<KongCheQueryResponse>('/kongche/query', req);
+
+// 导入控车 device id 列表 CSV 文件
+export const importKongCheCSV = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post<KongCheImportResponse>('/kongche/import-csv', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  });
+};
+
+// 创建控车管道任务 (COS下载 → 按 device id 过滤 → 输出SQL → 导入MySQL)
+export const createKongChePipeline = (req: CreateKongChePipelineRequest) =>
+  api.post<{ task_id: string; status: string; message: string }>('/kongche/pipeline/create', req);
 
 export default api;

@@ -40,6 +40,7 @@ func main() {
 	vehicleService := services.NewVehicleService()
 	archiveService := services.NewArchiveService(taskManager)
 	bindLogService := services.NewBindLogService()
+	kongCheService := services.NewKongCheService()
 	cosService := services.NewCOSService()
 
 	// 初始化任务持久化存储（必须在创建 Handler 之前，以便恢复任务）
@@ -48,7 +49,7 @@ func main() {
 	log.Println("[TaskStore] 任务持久化存储已初始化")
 
 	// 创建处理器
-	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService, cosService, pipelineManager)
+	h := handlers.NewHandler(vehicleService, archiveService, taskManager, bindLogService, kongCheService, cosService, pipelineManager)
 
 	// 启动CSV过滤器管理器(自动恢复未完成任务)
 	csvFilterMgr := h.GetCSVFilterManager()
@@ -130,6 +131,12 @@ func main() {
 		api.GET("/reversegeo/tasks", h.ListReverseGeoTasks)
 		api.POST("/reversegeo/cancel/:taskId", h.CancelReverseGeoTask)
 		api.GET("/reversegeo/download", h.DownloadReverseGeoFile)
+
+		// 控车系统
+		api.POST("/kongche/query", h.QueryKongCheDevices)
+		api.GET("/kongche/export", h.ExportKongCheDevices)
+		api.POST("/kongche/import-csv", h.ImportKongCheCSV)
+		api.POST("/kongche/pipeline/create", h.CreateKongChePipeline)
 	}
 
 	// 优雅关闭
@@ -141,6 +148,7 @@ func main() {
 		log.Println("正在关闭服务...")
 		vehicleService.Close()
 		bindLogService.Close()
+		kongCheService.Close()
 		os.Exit(0)
 	}()
 

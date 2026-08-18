@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tencentyun/cos-go-sdk-v5"
 
@@ -64,10 +66,23 @@ func (s *COSService) ensureClient() error {
 		return fmt.Errorf("解析COS地址失败: %w", err)
 	}
 
+	// 自定义 Transport，增加超时时间防止网络波动导致拨号超时
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   60 * time.Second, // 拨号超时 60 秒
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second, // 响应头超时
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          10,
+	}
+
 	s.client = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{
 		Transport: &cos.AuthorizationTransport{
 			SecretID:  cc.SecretID,
 			SecretKey: cc.SecretKey,
+			Transport: transport,
 		},
 		Timeout: 0, // 不设超时，大文件下载可能耗时较长
 	})
@@ -75,14 +90,18 @@ func (s *COSService) ensureClient() error {
 	return nil
 }
 
-// ListFiles 列出COS存储桶中的文件
+// ListFiles 列出COS存储桶中的文件(使用配置中的默认 base_dir)
 func (s *COSService) ListFiles(prefix string) ([]COSFileInfo, error) {
+	cfg := config.Get()
+	return s.ListFilesWithBaseDir(prefix, cfg.COSConfig.BaseDir)
+}
+
+// ListFilesWithBaseDir 列出COS存储桶中的文件,可指定自定义 base_dir(控车系统使用独立的目录前缀)
+func (s *COSService) ListFilesWithBaseDir(prefix, baseDir string) ([]COSFileInfo, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
 	}
 
-	cfg := config.Get()
-	baseDir := cfg.COSConfig.BaseDir
 	if prefix == "" {
 		prefix = baseDir
 	} else if baseDir != "" {

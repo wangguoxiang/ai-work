@@ -10,6 +10,7 @@ import {
   LinkOutlined,
   FilterOutlined,
   EnvironmentOutlined,
+  CarOutlined,
 } from '@ant-design/icons';
 import VehicleQuery from './components/VehicleQuery';
 import ConfigPanel from './components/ConfigPanel';
@@ -18,6 +19,8 @@ import TaskList from './components/TaskList';
 import BindLogQuery from './components/BindLogQuery';
 import CSVFilter from './components/CSVFilter';
 import ReverseGeo from './components/ReverseGeo';
+import KongCheQuery from './components/KongCheQuery';
+import KongCheFilter from './components/KongCheFilter';
 
 const { Header, Content } = Layout;
 const { Title } = Typography;
@@ -59,6 +62,16 @@ const App: React.FC = () => {
       key: 'reversegeo',
       label: <><EnvironmentOutlined /> 逆地址转换</>,
       children: <ReverseGeo />,
+    },
+    {
+      key: 'kongche-query',
+      label: <><CarOutlined /> 控车设备</>,
+      children: <KongCheQuery />,
+    },
+    {
+      key: 'kongche-filter',
+      label: <><FilterOutlined /> 控车过滤</>,
+      children: <KongCheFilter />,
     },
     {
       key: 'config',
