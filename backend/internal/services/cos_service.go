@@ -61,7 +61,7 @@ func (s *COSService) ensureClient() error {
 		return fmt.Errorf("COS配置不完整，请检查 secret_id / secret_key / bucket / region")
 	}
 
-	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cc.Bucket, cc.Region))
+	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos-internal.%s.myqcloud.com", cc.Bucket, cc.Region))
 	if err != nil {
 		return fmt.Errorf("解析COS地址失败: %w", err)
 	}
