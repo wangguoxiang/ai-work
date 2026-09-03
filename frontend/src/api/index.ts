@@ -526,6 +526,14 @@ export const getPipeline = (taskId: string) =>
 export const listPipelines = () =>
   api.get<{ total: number; tasks: PipelineTask[] }>('/pipeline/tasks');
 
+// 停止正在执行的管道任务(下载/过滤/导入中)
+export const stopPipelineTask = (taskId: string) =>
+  api.post(`/pipeline/task/${taskId}/stop`);
+
+// 删除尚未开始的管道任务(等待/排队中)
+export const deletePipelineTask = (taskId: string) =>
+  api.delete(`/pipeline/task/${taskId}`);
+
 // ============ 控车系统 (设备SN / device id) ============
 
 export interface KongCheDevice {

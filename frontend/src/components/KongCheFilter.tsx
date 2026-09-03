@@ -12,6 +12,7 @@ import {
   Col,
   Checkbox,
   Progress,
+  Modal,
 } from 'antd';
 import {
   PlayCircleOutlined,
@@ -24,12 +25,16 @@ import {
   FilterOutlined,
   DatabaseOutlined,
   ClockCircleOutlined,
+  DeleteOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import {
   listCOSFiles,
   importKongCheCSV,
   createKongChePipeline,
   listPipelines,
+  stopPipelineTask,
+  deletePipelineTask,
   getConfig,
   COSFileInfo,
   PipelineTask,
@@ -155,6 +160,46 @@ const KongCheFilter: React.FC = () => {
     } finally {
       setTaskLoading(false);
     }
+  };
+
+  // 停止正在执行的管道任务
+  const handleStopPipeline = (id: string) => {
+    Modal.confirm({
+      title: '停止并结束任务',
+      content: '确定停止并结束该任务吗? 下载/过滤/导入过程将被终止，已处理的过滤进度会保留(可断点续传)。',
+      okText: '停止并结束',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await stopPipelineTask(id);
+          message.success('已发送停止请求，任务正在结束...');
+          loadPipelines();
+        } catch (err: any) {
+          message.error('停止失败: ' + (err.response?.data?.error || err.message));
+        }
+      },
+    });
+  };
+
+  // 删除尚未开始的管道任务
+  const handleDeletePipeline = (id: string) => {
+    Modal.confirm({
+      title: '删除任务',
+      content: '确定删除该尚未开始的任务吗? 删除后任务将从列表中移除。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await deletePipelineTask(id);
+          message.success('任务已删除');
+          loadPipelines();
+        } catch (err: any) {
+          message.error('删除失败: ' + (err.response?.data?.error || err.message));
+        }
+      },
+    });
   };
 
   const getPipelineStatusTag = (status: string) => {
@@ -351,6 +396,20 @@ const KongCheFilter: React.FC = () => {
                         </div>
                       </details>
                       </>
+                      )}
+
+                      {/* 操作: 未开始任务→删除; 执行中任务→停止并结束 */}
+                      {(task.status === 'pending' || task.status === 'waiting') && (
+                        <div style={{ marginTop: 8, textAlign: 'right' }}>
+                          <Button size="small" danger icon={<DeleteOutlined />}
+                            onClick={() => handleDeletePipeline(task.id)}>删除</Button>
+                        </div>
+                      )}
+                      {(task.status === 'downloading' || task.status === 'filtering' || task.status === 'importing') && (
+                        <div style={{ marginTop: 8, textAlign: 'right' }}>
+                          <Button size="small" danger icon={<StopOutlined />}
+                            onClick={() => handleStopPipeline(task.id)}>停止并结束</Button>
+                        </div>
                       )}
                     </Card>
                   ))}

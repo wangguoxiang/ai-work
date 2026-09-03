@@ -914,6 +914,34 @@ func (h *Handler) ListPipelines(c *gin.Context) {
 	})
 }
 
+// StopPipeline 停止正在执行的管道任务(下载/过滤/导入中)
+func (h *Handler) StopPipeline(c *gin.Context) {
+	taskID := c.Param("taskId")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 不能为空"})
+		return
+	}
+	if err := h.pipelineMgr.StopTask(taskID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "stop_requested", "task_id": taskID})
+}
+
+// DeletePipeline 删除尚未开始的管道任务(等待/排队中)
+func (h *Handler) DeletePipeline(c *gin.Context) {
+	taskID := c.Param("taskId")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 不能为空"})
+		return
+	}
+	if err := h.pipelineMgr.DeleteTask(taskID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "deleted", "task_id": taskID})
+}
+
 // ========== CSV 过滤器 API ==========
 
 // CSVFilterRequest CSV过滤请求
@@ -993,7 +1021,12 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 		}
 		var prog *services.CSVProgressFile
 		if !req.Restart {
-			if p, ok := services.LoadCSVProgress(tarPath, req.CSVPath, outputPath); ok {
+			// outputPath 为空时使用与 Submit 默认一致的输出路径查找进度文件
+			progPath := outputPath
+			if progPath == "" {
+				progPath = services.CSVDefaultOutputPath(tarPath)
+			}
+			if p, ok := services.LoadCSVProgress(tarPath, req.CSVPath, progPath); ok {
 				prog = p
 			}
 		}

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -86,10 +87,45 @@ type PipelineTask struct {
 	mu        sync.Mutex
 	cosSvc    *COSService
 	filterMgr *CSVFilterTaskManager
+
+	// 停止/删除控制(用户点击"停止"或"删除"时生效)
+	cancel    chan struct{} // 关闭表示请求停止(懒初始化)
+	cancelled bool          // 是否已请求停止/删除
 }
 
 func (t *PipelineTask) lock()   { t.mu.Lock() }
 func (t *PipelineTask) unlock() { t.mu.Unlock() }
+
+// stopCh 返回任务停止信号 channel(懒初始化, 线程安全)
+func (t *PipelineTask) stopCh() chan struct{} {
+	t.lock()
+	defer t.unlock()
+	if t.cancel == nil {
+		t.cancel = make(chan struct{})
+	}
+	return t.cancel
+}
+
+// stopRequested 是否已请求停止/删除
+func (t *PipelineTask) stopRequested() bool {
+	t.lock()
+	defer t.unlock()
+	return t.cancelled
+}
+
+// requestStop 请求停止任务(幂等, channel 只关闭一次)
+func (t *PipelineTask) requestStop() {
+	t.lock()
+	defer t.unlock()
+	if t.cancelled {
+		return
+	}
+	t.cancelled = true
+	if t.cancel == nil {
+		t.cancel = make(chan struct{})
+	}
+	close(t.cancel)
+}
 
 // getSnapshot 获取线程安全的快照（复制所有字段、不包含互斥锁）
 func (t *PipelineTask) getSnapshot() PipelineTask {
@@ -208,6 +244,7 @@ func (pm *PipelineTaskManager) Create(req *PipelineCreateRequest) *PipelineTask 
 		Status:       StagePending,
 		StartAt:      now.Unix(),
 		UpdatedAt:    now.Unix(),
+		cancel:       make(chan struct{}),
 		COSKeys:      req.COSKeys,
 		TIDs:         req.TIDs,
 		VINs:         req.VINs,
@@ -263,6 +300,77 @@ func (pm *PipelineTaskManager) List() []PipelineTask {
 		return res[i].StartAt > res[j].StartAt
 	})
 	return res
+}
+
+// ========== 管道任务 停止/删除 ==========
+
+// StopTask 停止正在执行的管道任务(下载/过滤/导入中)。
+// 若任务尚未开始(等待/排队中)则直接删除。
+func (pm *PipelineTaskManager) StopTask(id string) error {
+	pm.mu.RLock()
+	t, ok := pm.tasks[id]
+	pm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("任务不存在")
+	}
+
+	t.lock()
+	st := t.Status
+	t.unlock()
+
+	switch st {
+	case StagePending, StageWaiting:
+		return pm.DeleteTask(id)
+	case StageDownload, StageFilter, StageImport:
+		t.requestStop()
+		t.setError("任务已停止")
+		log.Printf("[管道 %s] 用户请求停止任务", id)
+		if store := GetTaskStore(); store != nil {
+			store.MarkDirty()
+		}
+		return nil
+	default:
+		return fmt.Errorf("任务已结束，无法停止")
+	}
+}
+
+// DeleteTask 删除尚未开始执行的管道任务(等待/排队中)
+func (pm *PipelineTaskManager) DeleteTask(id string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	t, ok := pm.tasks[id]
+	if !ok {
+		return fmt.Errorf("任务不存在")
+	}
+
+	t.lock()
+	st := t.Status
+	t.unlock()
+	if st != StagePending && st != StageWaiting {
+		return fmt.Errorf("任务已开始执行，无法删除(可点击停止)")
+	}
+
+	// 标记取消，防止已从队列取出但尚未启动的任务继续执行
+	t.requestStop()
+	delete(pm.tasks, id)
+	pm.removeFromWaitQueue(id)
+
+	if store := GetTaskStore(); store != nil {
+		store.MarkDirty()
+	}
+	log.Printf("[管道 %s] 已删除未开始的任务", id)
+	return nil
+}
+
+// removeFromWaitQueue 从等待队列中移除指定任务(需持有 pm.mu)
+func (pm *PipelineTaskManager) removeFromWaitQueue(id string) {
+	for i, t := range pm.waitQueue {
+		if t.ID == id {
+			pm.waitQueue = append(pm.waitQueue[:i], pm.waitQueue[i+1:]...)
+			return
+		}
+	}
 }
 
 // syncImportProgress 从 CSVFilterTask 同步导入进度
@@ -387,6 +495,14 @@ func (pm *PipelineTaskManager) scheduleNext(cosService *COSService, filterMgr *C
 	// 获取信号量槽位（此时一定有空闲槽位）
 	pm.workerSem <- struct{}{}
 
+	// 任务在排队期间被删除/停止则跳过
+	if next.stopRequested() {
+		log.Printf("[管道 %s] 等待中的任务已被删除/停止，跳过执行", next.ID)
+		<-pm.workerSem
+		pm.scheduleNext(cosService, filterMgr)
+		return
+	}
+
 	log.Printf("[管道 %s] 从等待队列取出执行，剩余队列长度=%d", next.ID, len(pm.waitQueue))
 	next.setStage(StageDownload)
 	go pm.runPipelineAndRelease(next, cosService, filterMgr)
@@ -403,19 +519,40 @@ func (pm *PipelineTaskManager) RunPipeline(
 
 	// 标记开始
 	task.setStage(StageDownload)
+
+	// 尚未真正开始时已被请求停止 → 直接结束
+	if task.stopRequested() {
+		task.setError("任务已停止")
+		return
+	}
 	log.Printf("[管道 %s] 开始执行: %d 个COS文件, %d 个TID", task.ID, len(task.COSKeys), len(task.TIDs))
 
+	// 任务级取消 context: 用户点击"停止"时取消下载/导入等阶段
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-task.stopCh():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	// ======== 阶段1: 下载 ========
-	downloadedPaths, err := pm.runDownloadStage(task, cosService)
+	downloadedPaths, err := pm.runDownloadStage(ctx, task, cosService)
 	if err != nil {
-		task.setError(fmt.Sprintf("下载阶段失败: %v", err))
-		log.Printf("[管道 %s] 下载阶段失败: %v", task.ID, err)
+		if task.stopRequested() {
+			task.setError("任务已停止")
+		} else {
+			task.setError(fmt.Sprintf("下载阶段失败: %v", err))
+		}
+		log.Printf("[管道 %s] 下载阶段结束: %v", task.ID, err)
 		return
 	}
 	log.Printf("[管道 %s] 下载完成: %d 个文件", task.ID, len(downloadedPaths))
 
 	// ======== 阶段2: 过滤 + 导入 ========
-	pm.runFilterAndImportStage(task, filterMgr, downloadedPaths)
+	pm.runFilterAndImportStage(ctx, task, filterMgr, downloadedPaths)
 	log.Printf("[管道 %s] 管道执行完毕", task.ID)
 
 	// 清理下载的 tar.gz 文件
@@ -434,13 +571,19 @@ func (pm *PipelineTaskManager) cleanupDownloadedFiles(task *PipelineTask, paths 
 }
 
 // runDownloadStage 执行下载阶段
-func (pm *PipelineTaskManager) runDownloadStage(task *PipelineTask, cosService *COSService) ([]string, error) {
+func (pm *PipelineTaskManager) runDownloadStage(ctx context.Context, task *PipelineTask, cosService *COSService) ([]string, error) {
 	cfg := config.Get()
 	downloadDir := filepath.Join(cfg.WorkDir, "downloads")
 
 	var downloadedPaths []string
 
 	for i, key := range task.COSKeys {
+		// 用户已请求停止 → 提前结束
+		if task.stopRequested() {
+			log.Printf("[管道 %s] 下载阶段收到停止请求, 中止下载", task.ID)
+			return downloadedPaths, fmt.Errorf("任务已停止")
+		}
+
 		// 更新当前文件状态
 		pm.updateDownloadItem(task.ID, i, func(d *FileDownloadInfo) {
 			d.Message = "下载中..."
@@ -464,8 +607,8 @@ func (pm *PipelineTaskManager) runDownloadStage(task *PipelineTask, cosService *
 			continue
 		}
 
-		// 下载文件
-		err := cosService.DownloadFileWithProgress(key, localPath, func(downloaded, total int64) {
+		// 下载文件(支持 ctx 取消, 用户点击"停止"时中止当前文件下载)
+		err := cosService.DownloadFileWithProgressCtx(ctx, key, localPath, func(downloaded, total int64) {
 			pct := 0
 			if total > 0 {
 				pct = int(downloaded * 100 / total)
@@ -524,6 +667,7 @@ func (pm *PipelineTaskManager) runDownloadStage(task *PipelineTask, cosService *
 
 // runFilterAndImportStage 执行过滤+导入阶段
 func (pm *PipelineTaskManager) runFilterAndImportStage(
+	ctx context.Context,
 	task *PipelineTask,
 	filterMgr *CSVFilterTaskManager,
 	tarPaths []string,
@@ -550,17 +694,30 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 			return "TID"
 		}())
 
-	// 为每个 tar 文件创建过滤任务并串行执行
+	// 过滤任务组的取消信号: 用户点击"停止"时关闭, 使正在运行的过滤任务快速退出
 	groupCancel := make(chan struct{})
+	stopCh := task.stopCh()
+	go func() {
+		select {
+		case <-stopCh:
+			close(groupCancel)
+		case <-ctx.Done():
+			if task.stopRequested() {
+				close(groupCancel)
+			}
+		}
+	}()
+
+	// 为每个 tar 文件创建过滤任务并串行执行
 	submitOpts := SubmitOpts{DeviceIDCol: task.DeviceIDCol, TimestampCol: task.TimestampCol}
 	for _, tarPath := range tarPaths {
 		// 每个文件开始处理前重置为过滤阶段（确保多文件时进度不会卡在100%）
 		task.setStage(StageFilter)
-		select {
-		case <-groupCancel:
-			task.setError("管道已取消")
+
+		// 用户已请求停止 → 提前结束
+		if task.stopRequested() {
+			task.setError("任务已停止")
 			return
-		default:
 		}
 
 		ft, err := filterMgr.Submit(tarPath, task.CSVPath, "", false, groupCancel, submitOpts)
@@ -574,9 +731,9 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		task.FilterTaskID = ft.ID
 		task.unlock()
 
-		// 检查是否需要续传
+		// 检查是否需要续传(默认输出路径与 Submit 空 outputPath 生成的路径一致)
 		var prog *CSVProgressFile
-		if p, ok := LoadCSVProgress(tarPath, task.CSVPath, ""); ok {
+		if p, ok := LoadCSVProgress(tarPath, task.CSVPath, csvDefaultOutputPath(tarPath)); ok {
 			prog = p
 			log.Printf("[管道 %s] 续传过滤: %s (已处理 %d 行)", task.ID, tarPath, prog.LinesDone)
 		}
@@ -600,14 +757,24 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		task.unlock()
 
 		if snap.Status == CSVStatusFailed {
-			task.setError(fmt.Sprintf("过滤失败: %s", snap.Error))
+			if task.stopRequested() {
+				task.setError("任务已停止")
+			} else {
+				task.setError(fmt.Sprintf("过滤失败: %s", snap.Error))
+			}
 			return
 		}
 
 		// 过滤成功，将过滤后的 SQL 文件导入临时 MySQL 数据库
 		task.setStage(StageImport)
 		log.Printf("[管道 %s] 过滤完成，开始导入MySQL: task=%s, output=%s", task.ID, ft.ID, ft.OutputPath)
-		ImportSQLToTempDBWithTask(ft, ft.OutputPath)
+
+		// 导入前再次检查是否已停止(避免启动多余的导入)
+		if task.stopRequested() {
+			task.setError("任务已停止")
+			return
+		}
+		ImportSQLToTempDBWithTaskCtx(ft, ft.OutputPath, ctx)
 
 		// 最终状态检查并更新进度
 		task.lock()
@@ -622,6 +789,10 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		task.recalcProgress()
 		task.unlock()
 
+		if task.stopRequested() {
+			task.setError("任务已停止")
+			return
+		}
 		if snap2.ImportStatus == CSVImportFailed {
 			task.setError(fmt.Sprintf("导入失败: %s", snap2.ImportError))
 			return

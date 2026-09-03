@@ -186,6 +186,11 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 
 // DownloadFileWithProgress 从COS下载文件到本地，通过回调报告进度
 func (s *COSService) DownloadFileWithProgress(key, localPath string, progressFn ProgressCallback) error {
+	return s.DownloadFileWithProgressCtx(context.Background(), key, localPath, progressFn)
+}
+
+// DownloadFileWithProgressCtx 从COS下载文件到本地，支持通过 ctx 取消下载
+func (s *COSService) DownloadFileWithProgressCtx(ctx context.Context, key, localPath string, progressFn ProgressCallback) error {
 	if err := s.ensureClient(); err != nil {
 		return err
 	}
@@ -197,7 +202,7 @@ func (s *COSService) DownloadFileWithProgress(key, localPath string, progressFn 
 	}
 
 	// 先 HEAD 获取文件大小
-	resp, err := s.client.Object.Get(context.Background(), key, nil)
+	resp, err := s.client.Object.Get(ctx, key, nil)
 	if err != nil {
 		return fmt.Errorf("下载COS文件失败: %w", err)
 	}

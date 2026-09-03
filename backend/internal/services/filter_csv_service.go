@@ -370,6 +370,11 @@ func csvDefaultOutputPath(tarPath string) string {
 	return base + "_filtered.sql"
 }
 
+// CSVDefaultOutputPath 返回默认过滤输出路径(与 Submit 传空 outputPath 时行为一致)
+func CSVDefaultOutputPath(tarPath string) string {
+	return csvDefaultOutputPath(tarPath)
+}
+
 // ========== CSV 解析 ==========
 
 // ReadCSV 读取 CSV,返回 map[tid][]CSVSegment

@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -32,6 +33,11 @@ type ImportProgressFn func(total, done int64)
 // ImportSQLToTempDB 将过滤后的 SQL 文件导入临时 MySQL 数据库
 // 通过 mysql 命令行客户端执行 source 命令来导入，避免 Go 解析 SQL 的兼容性问题
 func ImportSQLToTempDB(sqlPath string, progressFn ImportProgressFn) error {
+	return ImportSQLToTempDBCtx(context.Background(), sqlPath, progressFn)
+}
+
+// ImportSQLToTempDBCtx 将过滤后的 SQL 文件导入临时 MySQL 数据库，支持通过 ctx 取消导入
+func ImportSQLToTempDBCtx(ctx context.Context, sqlPath string, progressFn ImportProgressFn) error {
 	cfg := config.Get()
 
 	// 检查 SQL 文件是否存在
@@ -63,7 +69,7 @@ func ImportSQLToTempDB(sqlPath string, progressFn ImportProgressFn) error {
 		cfg.TempDB.DBName,
 	}
 
-	cmd := exec.Command("mysql", args...)
+	cmd := exec.CommandContext(ctx, "mysql", args...)
 
 	f, err := os.Open(sqlPath)
 	if err != nil {
@@ -100,6 +106,12 @@ func ImportSQLToTempDB(sqlPath string, progressFn ImportProgressFn) error {
 
 // ImportSQLToTempDBWithTask 将过滤后的 SQL 文件导入临时 MySQL，并更新 CSVFilterTask 的导入进度
 func ImportSQLToTempDBWithTask(task *CSVFilterTask, sqlPath string) {
+	ImportSQLToTempDBWithTaskCtx(task, sqlPath, context.Background())
+}
+
+// ImportSQLToTempDBWithTaskCtx 将过滤后的 SQL 文件导入临时 MySQL，并更新 CSVFilterTask 的导入进度。
+// 通过 ctx 取消时可终止导入(用于用户停止管道任务)。
+func ImportSQLToTempDBWithTaskCtx(task *CSVFilterTask, sqlPath string, ctx context.Context) {
 	// 已导入完成则跳过
 	if task.ImportStatus == CSVImportDone {
 		log.Printf("[SQL导入] 跳过: task=%s, 已经导入完成", task.ID)
@@ -124,7 +136,7 @@ func ImportSQLToTempDBWithTask(task *CSVFilterTask, sqlPath string) {
 	pct := 0
 	task.setImportProgress(pct, totalLines, 0)
 
-	err := ImportSQLToTempDB(sqlPath, func(total, done int64) {
+	err := ImportSQLToTempDBCtx(ctx, sqlPath, func(total, done int64) {
 		// total/done 是文件字节数，这里用总行数换算进度
 		p := 0
 		if total > 0 {

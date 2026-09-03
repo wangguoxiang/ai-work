@@ -123,6 +123,8 @@ func main() {
 		api.POST("/pipeline/create", h.CreatePipeline)
 		api.GET("/pipeline/task/:taskId", h.GetPipeline)
 		api.GET("/pipeline/tasks", h.ListPipelines)
+		api.POST("/pipeline/task/:taskId/stop", h.StopPipeline)
+		api.DELETE("/pipeline/task/:taskId", h.DeletePipeline)
 
 		// 逆地址转换(天地图)
 		api.POST("/reversegeo/upload", h.UploadReverseGeoCSV)
