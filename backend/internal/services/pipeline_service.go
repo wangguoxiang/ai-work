@@ -731,9 +731,9 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		task.FilterTaskID = ft.ID
 		task.unlock()
 
-		// 检查是否需要续传(默认输出路径与 Submit 空 outputPath 生成的路径一致)
+		// 按 Submit 决定的 outputPath 精确查找进度文件(用于续传)
 		var prog *CSVProgressFile
-		if p, ok := LoadCSVProgress(tarPath, task.CSVPath, csvDefaultOutputPath(tarPath)); ok {
+		if p, ok := LoadCSVProgressAt(tarPath, task.CSVPath, ft.OutputPath); ok {
 			prog = p
 			log.Printf("[管道 %s] 续传过滤: %s (已处理 %d 行)", task.ID, tarPath, prog.LinesDone)
 		}

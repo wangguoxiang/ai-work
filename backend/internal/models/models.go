@@ -68,12 +68,17 @@ type TaskStatus struct {
 	Logs            []string `json:"logs"` // 详细步骤日志
 }
 
-// COSConfig 腾讯云COS存储桶配置
+// COSConfig 对象存储桶配置(支持腾讯云 COS 与阿里云 OSS)
+// Provider 取值: "tencent"(默认) / "aliyun"
+// 腾讯云: region 形如 "ap-shanghai", endpoint 可留空(自动构造 cos-internal 内网地址)
+// 阿里云: region 形如 "cn-hangzhou" 或 "oss-cn-hangzhou", endpoint 可留空(默认构造 oss-{region}-internal.aliyuncs.com)
 type COSConfig struct {
+	Provider  string `json:"provider"`
 	SecretID  string `json:"secret_id"`
 	SecretKey string `json:"secret_key"`
 	Bucket    string `json:"bucket"`
 	Region    string `json:"region"`
+	Endpoint  string `json:"endpoint"`
 	BaseDir   string `json:"base_dir"`
 }
 
@@ -181,10 +186,12 @@ func DefaultConfig() AppConfig {
 			Timeout:           "10s",
 		},
 		COSConfig: COSConfig{
+			Provider:  "tencent",
 			SecretID:  "",
 			SecretKey: "",
 			Bucket:    "",
 			Region:    "",
+			Endpoint:  "",
 			BaseDir:   "",
 		},
 		WorkDir:        "./work",

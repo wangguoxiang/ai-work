@@ -39,10 +39,12 @@
     "timeout": "10s"
   },
   "cos_config": {
+    "provider": "tencent",
     "secret_id": "CHANGE_ME",
     "secret_key": "CHANGE_ME",
     "bucket": "CHANGE_ME",
     "region": "ap-shanghai",
+    "endpoint": "",
     "base_dir": "qjcg/"
   },
   "work_dir": "./data",

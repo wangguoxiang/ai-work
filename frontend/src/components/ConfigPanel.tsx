@@ -13,12 +13,14 @@ import {
   Typography,
   Row,
   Col,
+  Radio,
 } from 'antd';
 import {
   SaveOutlined,
   DatabaseOutlined,
   FolderOpenOutlined,
   SettingOutlined,
+  CloudServerOutlined,
 } from '@ant-design/icons';
 import { getConfig, saveFullConfig, AppConfig } from '../api';
 
@@ -35,6 +37,7 @@ const ConfigPanel: React.FC<Props> = ({ onSaved }) => {
   const [tempPassword, setTempPassword] = useState('');
   const [vehiclePassword, setVehiclePassword] = useState('');
   const [kongchePassword, setKongchePassword] = useState('');
+  const [cosSecretKey, setCosSecretKey] = useState('');
 
   // 加载配置
   useEffect(() => {
@@ -73,6 +76,10 @@ const ConfigPanel: React.FC<Props> = ({ onSaved }) => {
           ...config.kongche_db,
           password: kongchePassword || config.kongche_db?.password || '',
         },
+        cos_config: {
+          ...config.cos_config,
+          secret_key: cosSecretKey || config.cos_config?.secret_key || '',
+        },
       };
 
       await saveFullConfig(cfgToSave);
@@ -80,6 +87,7 @@ const ConfigPanel: React.FC<Props> = ({ onSaved }) => {
       setTempPassword('');
       setVehiclePassword('');
       setKongchePassword('');
+      setCosSecretKey('');
       onSaved?.();
     } catch (err: any) {
       message.error('保存配置失败: ' + (err.response?.data?.error || err.message));
@@ -521,6 +529,171 @@ const ConfigPanel: React.FC<Props> = ({ onSaved }) => {
                 }
               />
             </Form>
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={24}>
+        {/* 对象存储桶配置 (腾讯云 COS / 阿里云 OSS) */}
+        <Col xs={24} lg={12}>
+          <Card
+            title={
+              <Space>
+                <CloudServerOutlined />
+                <span>对象存储桶 (腾讯云 COS / 阿里云 OSS)</span>
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          >
+            <Form layout="vertical">
+              <Form.Item label="存储提供商" help="选择 GPS 归档文件所在的对象存储服务">
+                <Radio.Group
+                  value={config.cos_config?.provider || 'tencent'}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      cos_config: { ...config.cos_config, provider: e.target.value },
+                    })
+                  }
+                >
+                  <Radio.Button value="tencent">腾讯云 COS</Radio.Button>
+                  <Radio.Button value="aliyun">阿里云 OSS</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+              <Form.Item
+                label={config.cos_config?.provider === 'aliyun' ? 'AccessKey ID' : 'Secret ID'}
+              >
+                <Input
+                  value={config.cos_config?.secret_id}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      cos_config: { ...config.cos_config, secret_id: e.target.value },
+                    })
+                  }
+                  placeholder={config.cos_config?.provider === 'aliyun' ? 'LTAI...' : 'AKID...'}
+                />
+              </Form.Item>
+              <Form.Item
+                label={config.cos_config?.provider === 'aliyun' ? 'AccessKey Secret' : 'Secret Key'}
+              >
+                <Input.Password
+                  value={cosSecretKey}
+                  onChange={(e) => setCosSecretKey(e.target.value)}
+                  placeholder="输入密钥（留空则不修改）"
+                />
+              </Form.Item>
+              <Form.Item label="存储桶名称 (Bucket)">
+                <Input
+                  value={config.cos_config?.bucket}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      cos_config: { ...config.cos_config, bucket: e.target.value },
+                    })
+                  }
+                  placeholder={config.cos_config?.provider === 'aliyun' ? 'my-bucket' : 'my-bucket-1250000000'}
+                />
+              </Form.Item>
+              <Form.Item
+                label="地域 (Region)"
+                help={
+                  config.cos_config?.provider === 'aliyun'
+                    ? '阿里云地域,例: cn-hangzhou / cn-shanghai'
+                    : '腾讯云地域,例: ap-shanghai / ap-guangzhou'
+                }
+              >
+                <Input
+                  value={config.cos_config?.region}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      cos_config: { ...config.cos_config, region: e.target.value },
+                    })
+                  }
+                  placeholder={config.cos_config?.provider === 'aliyun' ? 'cn-hangzhou' : 'ap-shanghai'}
+                />
+              </Form.Item>
+              {config.cos_config?.provider === 'aliyun' && (
+                <Form.Item
+                  label="自定义 Endpoint (可选)"
+                  help="留空时默认使用内网地址 oss-{region}-internal.aliyuncs.com。如需外网或自定义域名请手动填写"
+                >
+                  <Input
+                    value={config.cos_config?.endpoint}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        cos_config: { ...config.cos_config, endpoint: e.target.value },
+                      })
+                    }
+                    placeholder="例: oss-cn-hangzhou.aliyuncs.com"
+                  />
+                </Form.Item>
+              )}
+              <Form.Item label="目录前缀 (Base Dir)" help="存储桶中的基础目录,例: qjcg/">
+                <Input
+                  value={config.cos_config?.base_dir}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      cos_config: { ...config.cos_config, base_dir: e.target.value },
+                    })
+                  }
+                  placeholder="qjcg/"
+                />
+              </Form.Item>
+            </Form>
+          </Card>
+        </Col>
+
+        {/* 对象存储说明 */}
+        <Col xs={24} lg={12}>
+          <Card
+            title={
+              <Space>
+                <SettingOutlined />
+                <span>存储提供商说明</span>
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          >
+            <Alert
+              type="info"
+              showIcon
+              message="腾讯云 COS"
+              description={
+                <Text style={{ fontSize: 12 }}>
+                  使用 <code>region</code> 自动构造内网地址:
+                  <br />
+                  <code>https://&#123;bucket&#125;.cos-internal.&#123;region&#125;.myqcloud.com</code>
+                  <br />
+                  适用于部署在腾讯云 VPC 内的服务器，无需填写 endpoint。
+                </Text>
+              }
+              style={{ marginBottom: 12 }}
+            />
+            <Alert
+              type="info"
+              showIcon
+              message="阿里云 OSS"
+              description={
+                <Text style={{ fontSize: 12 }}>
+                  默认使用 <code>region</code> 构造内网地址:
+                  <br />
+                  <code>oss-&#123;region&#125;-internal.aliyuncs.com</code>
+                  <br />
+                  如需外网访问(例: <code>oss-cn-hangzhou.aliyuncs.com</code>) 或自定义域名，请在
+                  “自定义 Endpoint” 中填写完整地址。
+                </Text>
+              }
+              style={{ marginBottom: 12 }}
+            />
+            <Divider style={{ margin: '12px 0' }} />
+            <Text style={{ fontSize: 12 }} type="secondary">
+              提示: 切换提供商后请确保 secret_id / secret_key / bucket / region 与目标服务匹配。
+              修改保存后后端会自动重建存储客户端。
+            </Text>
           </Card>
         </Col>
       </Row>

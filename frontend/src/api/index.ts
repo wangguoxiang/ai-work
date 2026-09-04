@@ -34,10 +34,12 @@ export interface KongCheDBConfig {
 }
 
 export interface COSConfig {
+  provider?: string;      // 'tencent' | 'aliyun' (默认 tencent)
   secret_id: string;
   secret_key: string;
   bucket: string;
   region: string;
+  endpoint?: string;      // 可选自定义 endpoint(阿里云 OSS),未填则根据 region 推导内网地址
   base_dir: string;
 }
 

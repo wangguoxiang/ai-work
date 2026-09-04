@@ -112,6 +112,9 @@ func UpdatePartial(updates map[string]interface{}) error {
 	}
 	if v, ok := updates["cos_config"]; ok {
 		if m, ok := v.(map[string]interface{}); ok {
+			if vv, ok := m["provider"]; ok {
+				cfg.COSConfig.Provider = toString(vv)
+			}
 			if vv, ok := m["secret_id"]; ok {
 				cfg.COSConfig.SecretID = toString(vv)
 			}
@@ -123,6 +126,9 @@ func UpdatePartial(updates map[string]interface{}) error {
 			}
 			if vv, ok := m["region"]; ok {
 				cfg.COSConfig.Region = toString(vv)
+			}
+			if vv, ok := m["endpoint"]; ok {
+				cfg.COSConfig.Endpoint = toString(vv)
 			}
 			if vv, ok := m["base_dir"]; ok {
 				cfg.COSConfig.BaseDir = toString(vv)

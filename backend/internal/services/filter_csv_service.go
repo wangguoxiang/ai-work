@@ -195,8 +195,8 @@ func csvProgressPath(outputPath string) string {
 	return outputPath + ".progress.json"
 }
 
-// LoadCSVProgress 加载进度文件
-func LoadCSVProgress(tarPath, csvPath, outputPath string) (*CSVProgressFile, bool) {
+// LoadCSVProgressAt 加载指定 outputPath 的进度文件(精确匹配)
+func LoadCSVProgressAt(tarPath, csvPath, outputPath string) (*CSVProgressFile, bool) {
 	data, err := os.ReadFile(csvProgressPath(outputPath))
 	if err != nil {
 		return nil, false
@@ -216,6 +216,56 @@ func LoadCSVProgress(tarPath, csvPath, outputPath string) (*CSVProgressFile, boo
 		return nil, false
 	}
 	return &p, true
+}
+
+// LoadCSVProgress 自动查找与 tarPath+csvPath 匹配的进度文件(用于 outputPath 未知的续传场景)
+// 同时兼容旧格式(无时间戳)与新格式(带 HHMMSS 时间戳)的进度文件
+func LoadCSVProgress(tarPath, csvPath string) (*CSVProgressFile, bool) {
+	// 1. 先尝试旧格式(无时间戳)
+	if p, ok := LoadCSVProgressAt(tarPath, csvPath, csvLegacyOutputPath(tarPath)); ok {
+		return p, true
+	}
+	// 2. 搜索带时间戳的进度文件,按修改时间倒序取最新的
+	dir := filepath.Dir(tarPath)
+	base := strings.TrimSuffix(strings.TrimSuffix(filepath.Base(tarPath), ".gz"), ".tar")
+	pattern := filepath.Join(dir, base+"_filtered_*.sql.progress.json")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) == 0 {
+		return nil, false
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		si, errI := os.Stat(matches[i])
+		sj, errJ := os.Stat(matches[j])
+		if errI != nil || errJ != nil {
+			return false
+		}
+		return si.ModTime().After(sj.ModTime())
+	})
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		var p CSVProgressFile
+		if err := json.Unmarshal(data, &p); err != nil {
+			continue
+		}
+		if p.TarPath != tarPath || p.CSVPath != csvPath {
+			continue
+		}
+		st, err := os.Stat(tarPath)
+		if err != nil {
+			continue
+		}
+		if p.TarSize != st.Size() || p.TarMTime != st.ModTime().Unix() {
+			continue
+		}
+		if p.OutputPath == "" {
+			continue
+		}
+		return &p, true
+	}
+	return nil, false
 }
 
 func saveCSVProgress(p *CSVProgressFile) error {
@@ -320,9 +370,6 @@ type SubmitOpts struct {
 
 // Submit 提交新任务
 func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, restart bool, groupCancel chan struct{}, opts ...SubmitOpts) (*CSVFilterTask, error) {
-	if outputPath == "" {
-		outputPath = csvDefaultOutputPath(tarPath)
-	}
 	deviceIDCol := colTID
 	timestampCol := colTimestamp
 	if len(opts) > 0 {
@@ -340,6 +387,22 @@ func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, resta
 		m.mu.Unlock()
 		return existing, nil
 	}
+	m.mu.Unlock()
+
+	// 确定输出路径:
+	// - 用户显式指定:直接使用
+	// - 未指定且非 restart:尝试从已有进度文件恢复(续传)
+	// - 其他情况:生成带 HHMMSS 时间戳的新路径,避免覆盖旧文件
+	if outputPath == "" {
+		if !restart {
+			if p, ok := LoadCSVProgress(tarPath, csvPath); ok && p.OutputPath != "" {
+				outputPath = p.OutputPath
+			}
+		}
+		if outputPath == "" {
+			outputPath = csvDefaultOutputPath(tarPath)
+		}
+	}
 	if restart {
 		clearCSVProgress(outputPath)
 		_ = os.Remove(outputPath)
@@ -348,6 +411,7 @@ func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, resta
 	if cancelCh == nil {
 		cancelCh = make(chan struct{})
 	}
+	m.mu.Lock()
 	m.order++
 	t := &CSVFilterTask{
 		ID: id, TarPath: tarPath, CSVPath: csvPath, OutputPath: outputPath,
@@ -362,6 +426,26 @@ func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, resta
 }
 
 func csvDefaultOutputPath(tarPath string) string {
+	ext := filepath.Ext(tarPath)
+	base := tarPath[:len(tarPath)-len(ext)]
+	if strings.HasSuffix(base, ".tar") {
+		base = base[:len(base)-4]
+	}
+	// 追加 HHMMSS 时间戳,避免同一 tar.gz 多次过滤时覆盖旧文件
+	ts := time.Now().Format("150405")
+	candidate := fmt.Sprintf("%s_filtered_%s.sql", base, ts)
+	// 同一秒内重复提交时追加序号,保证唯一
+	for i := 1; i < 1000; i++ {
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s_filtered_%s_%d.sql", base, ts, i)
+	}
+	return candidate
+}
+
+// csvLegacyOutputPath 返回旧格式(无时间戳)的输出路径,仅用于向后兼容进度文件查找
+func csvLegacyOutputPath(tarPath string) string {
 	ext := filepath.Ext(tarPath)
 	base := tarPath[:len(tarPath)-len(ext)]
 	if strings.HasSuffix(base, ".tar") {

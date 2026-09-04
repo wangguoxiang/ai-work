@@ -1019,22 +1019,19 @@ func (h *Handler) StartCSVFilter(c *gin.Context) {
 		if outputPath == "" || len(tarPaths) > 1 {
 			outputPath = ""
 		}
-		var prog *services.CSVProgressFile
-		if !req.Restart {
-			// outputPath 为空时使用与 Submit 默认一致的输出路径查找进度文件
-			progPath := outputPath
-			if progPath == "" {
-				progPath = services.CSVDefaultOutputPath(tarPath)
-			}
-			if p, ok := services.LoadCSVProgress(tarPath, req.CSVPath, progPath); ok {
-				prog = p
-			}
-		}
+		// 先提交任务(Submit 内部会自动决定最终 outputPath:显式指定 / 续传 / 新建带时间戳)
 		t, err := h.csvFilterMgr.Submit(tarPath, req.CSVPath, outputPath, req.Restart, groupCancel,
 			services.SubmitOpts{DeviceIDCol: req.DeviceIDCol, TimestampCol: req.TimestampCol})
 		if err != nil {
 			results = append(results, submittedTask{TarPath: tarPath, Error: err.Error()})
 			continue
+		}
+		// 再按 Submit 决定的 outputPath 精确查找进度文件(用于续传)
+		var prog *services.CSVProgressFile
+		if !req.Restart {
+			if p, ok := services.LoadCSVProgressAt(tarPath, req.CSVPath, t.OutputPath); ok {
+				prog = p
+			}
 		}
 		queue = append(queue, pendingTask{t: t, prog: prog})
 		rf := int64(0)
