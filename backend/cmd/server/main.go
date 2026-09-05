@@ -155,7 +155,7 @@ func main() {
 	}()
 
 	// 启动服务器
-	port := "8090"
+	port := "8080"
 	if envPort := os.Getenv("PORT"); envPort != "" {
 		port = envPort
 	}

@@ -100,7 +100,10 @@ func (s *COSService) ensureClient() error {
 			return fmt.Errorf("阿里云 OSS 配置不完整: region 或 endpoint 至少提供一个")
 		}
 		client, err := oss.New(endpoint, cc.SecretID, cc.SecretKey,
-			oss.Timeout(60, 0), // 连接超时60秒,读超时不限
+			// 注意: 本 SDK 的 Timeout 会把 0 直接当作截止时间(now+0 即立即过期),
+			// 文档声称的 "0 表示无限超时" 并不生效,传 0 会导致所有读写立刻 i/o timeout,
+			// 因此这里读写超时不能为 0
+			oss.Timeout(60, 60), // 连接超时60秒,单次读写超时60秒
 			oss.EnableCRC(false),
 		)
 		if err != nil {
@@ -147,13 +150,17 @@ func (s *COSService) ensureClient() error {
 
 // buildAliyunEndpoint 构造阿里云 OSS endpoint
 // 优先使用显式配置的 endpoint,否则基于 region 构造内网地址
+//
+// 注意: aliyun-oss-go-sdk 对不带协议前缀的 endpoint 默认走 http(端口80),
+// 在多数网络(尤其经代理/防火墙)下访问公网 OSS 会超时,因此必须显式携带 https://
 func buildAliyunEndpoint(region, endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint != "" {
-		// 去掉可能的协议前缀,SDK 会自动补全
-		endpoint = strings.TrimPrefix(endpoint, "https://")
-		endpoint = strings.TrimPrefix(endpoint, "http://")
-		return endpoint
+		// 保留用户显式指定的协议;未指定协议时统一补 https
+		if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+			return endpoint
+		}
+		return "https://" + endpoint
 	}
 	region = strings.TrimSpace(region)
 	if region == "" {
@@ -162,7 +169,7 @@ func buildAliyunEndpoint(region, endpoint string) string {
 	// region 可能形如 "cn-hangzhou" 或 "oss-cn-hangzhou"
 	r := strings.TrimPrefix(region, "oss-")
 	// 默认使用内网 endpoint(与腾讯云 cos-internal 行为一致)
-	return fmt.Sprintf("oss-%s-internal.aliyuncs.com", r)
+	return fmt.Sprintf("https://oss-%s-internal.aliyuncs.com", r)
 }
 
 // Provider 返回当前使用的存储提供商
