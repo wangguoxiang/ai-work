@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"gps-archive-tool/internal/config"
@@ -161,6 +162,80 @@ func ImportSQLToTempDBWithTaskCtx(task *CSVFilterTask, sqlPath string, ctx conte
 
 	task.setImportDone(totalLines)
 	log.Printf("[SQL导入] 完成: task=%s, output=%s, 已导入 %d 条INSERT", task.ID, sqlPath, totalLines)
+}
+
+// ImportSQLFilesToTempDBWithTaskCtx 将多个过滤后的 SQL 文件(按TID拆分)逐个导入临时 MySQL,
+// 并把多个文件的 INSERT 总数聚合到 task 的 ImportTotal/ImportDone/ImportProgress 上。
+// 任一文件失败即标记失败并停止。
+func ImportSQLFilesToTempDBWithTaskCtx(task *CSVFilterTask, sqlPaths []string, ctx context.Context) {
+	if task.ImportStatus == CSVImportDone {
+		log.Printf("[SQL导入] 跳过: task=%s, 已经导入完成", task.ID)
+		return
+	}
+	if len(sqlPaths) == 0 {
+		task.setImportDone(0)
+		return
+	}
+
+	// 预统计所有文件的总 INSERT 行数
+	var grandTotal int64
+	for _, p := range sqlPaths {
+		grandTotal += countInsertLines(p)
+	}
+
+	task.setImportStatus(CSVImportRunning, 0, 0)
+	var doneTotal int64
+
+	for i, p := range sqlPaths {
+		if ctx != nil && ctx.Err() != nil {
+			task.setImportError("导入被取消")
+			return
+		}
+		fileLines := countInsertLines(p)
+		log.Printf("[SQL导入] 开始(%d/%d): task=%s, file=%s, INSERT=%d", i+1, len(sqlPaths), task.ID, p, fileLines)
+		task.setImportProgress(progressOf(doneTotal, grandTotal), grandTotal, doneTotal)
+
+		err := ImportSQLToTempDBCtx(ctx, p, func(total, done int64) {
+			pct := 0
+			if total > 0 {
+				pct = int(done * 100 / total)
+			}
+			if pct < 0 {
+				pct = 0
+			}
+			if pct > 100 {
+				pct = 100
+			}
+			// 当前文件按字节进度换算成行数, 再加上前面文件已完成的
+			curDone := fileLines * int64(pct) / 100
+			task.setImportProgress(progressOf(doneTotal+curDone, grandTotal), grandTotal, doneTotal+curDone)
+		})
+		if err != nil {
+			task.setImportError(fmt.Sprintf("导入 %s 失败: %v", filepath.Base(p), err))
+			log.Printf("[SQL导入] 失败: task=%s, file=%s, error=%v", task.ID, p, err)
+			return
+		}
+		doneTotal += fileLines
+		task.setImportProgress(progressOf(doneTotal, grandTotal), grandTotal, doneTotal)
+	}
+
+	task.setImportDone(grandTotal)
+	log.Printf("[SQL导入] 全部完成: task=%s, 共 %d 个文件, %d 条INSERT", task.ID, len(sqlPaths), grandTotal)
+}
+
+// progressOf 计算 done/total 的百分比(0-100), total<=0 时返回 0
+func progressOf(done, total int64) int {
+	if total <= 0 {
+		return 0
+	}
+	p := done * 100 / total
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return int(p)
 }
 
 // ========== 表结构 ==========

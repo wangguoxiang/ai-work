@@ -60,6 +60,14 @@ type CSVFilterTask struct {
 	DeviceIDCol  int `json:"device_id_col,omitempty"`
 	TimestampCol int `json:"timestamp_col,omitempty"`
 
+	// SplitByTID 为 true 时按 TID 拆分输出: 每个 TID 生成独立的 *_filtered_<TID>.sql 文件
+	SplitByTID bool `json:"split_by_tid,omitempty"`
+	// TIDOrder 期望输出的 TID 顺序(仅 split 模式用于稳定文件命名与避免空文件)
+	TIDOrder []string `json:"tid_order,omitempty"`
+
+	// OutputFiles 本次任务实际产生的输出文件(单文件=[OutputPath]; split 模式=各 TID 文件)
+	OutputFiles []string `json:"output_files,omitempty"`
+
 	LinesDone int64 `json:"lines_done"`
 	RawLines  int64 `json:"raw_lines"`
 	KeptLines int64 `json:"kept_lines"`
@@ -89,7 +97,9 @@ func (t *CSVFilterTask) Snapshot() CSVFilterTask {
 		Status: t.Status, Error: t.Error,
 		StartedAt: t.StartedAt, UpdatedAt: t.UpdatedAt, FinishedAt: t.FinishedAt,
 		DeviceIDCol: t.DeviceIDCol, TimestampCol: t.TimestampCol,
-		LinesDone: t.LinesDone, RawLines: t.RawLines, KeptLines: t.KeptLines,
+		SplitByTID: t.SplitByTID, TIDOrder: t.TIDOrder,
+		OutputFiles: t.OutputFiles,
+		LinesDone:   t.LinesDone, RawLines: t.RawLines, KeptLines: t.KeptLines,
 		FirstTS: t.FirstTS, LastTS: t.LastTS, Resumed: t.Resumed,
 		Pct: t.Pct, SubmitOrder: t.SubmitOrder,
 		ImportStatus: t.ImportStatus, ImportProgress: t.ImportProgress,
@@ -282,6 +292,19 @@ func clearCSVProgress(outputPath string) {
 	_ = os.Remove(csvProgressPath(outputPath))
 }
 
+// clearSplitOutputs 删除某 OutputPath 派生出的历史按TID分桶文件(<stem>_<TID>.sql)
+// 仅匹配形如 "<stem>_<任意>.sql" 的文件, 前缀精确, 不会误删无关文件。
+func clearSplitOutputs(outputPath string) {
+	ext := filepath.Ext(outputPath)
+	stem := strings.TrimSuffix(outputPath, ext)
+	pattern := stem + "_*" + ext
+	matches, _ := filepath.Glob(pattern)
+	for _, m := range matches {
+		_ = os.Remove(m)
+	}
+	_ = os.Remove(csvProgressPath(outputPath))
+}
+
 // ========== CSVFilterTaskManager ==========
 
 // CSVFilterTaskManager 管理 CSV 过滤任务
@@ -302,6 +325,17 @@ func csvTaskID(tarPath, csvPath string, deviceIDCol int) string {
 		deviceIDCol = colTID
 	}
 	return fmt.Sprintf("%x", simpleHash(tarPath+"|"+csvPath+"|"+strconv.Itoa(deviceIDCol)))
+}
+
+// csvTaskIDSplit 与 csvTaskID 一致, 但将 split 标志纳入哈希, 避免与同 tar+csv 的单文件任务冲突
+func csvTaskIDSplit(tarPath, csvPath string, deviceIDCol int, split bool) string {
+	if !split {
+		return csvTaskID(tarPath, csvPath, deviceIDCol)
+	}
+	if deviceIDCol <= 0 {
+		deviceIDCol = colTID
+	}
+	return fmt.Sprintf("%x", simpleHash(tarPath+"|"+csvPath+"|"+strconv.Itoa(deviceIDCol)+"|split"))
 }
 
 func simpleHash(s string) uint64 {
@@ -366,12 +400,18 @@ func (t *CSVFilterTask) SetError(err string) {
 type SubmitOpts struct {
 	DeviceIDCol  int // device id 在 INSERT VALUES 中的列索引(0-based), 0=默认2
 	TimestampCol int // 时间戳列索引, 0=默认18
+	// SplitByTID 为 true 时按 TID 拆分输出(每个TID一个独立SQL文件)
+	SplitByTID bool
+	// TIDOrder 期望输出的 TID 顺序(仅 split 模式)
+	TIDOrder []string
 }
 
 // Submit 提交新任务
 func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, restart bool, groupCancel chan struct{}, opts ...SubmitOpts) (*CSVFilterTask, error) {
 	deviceIDCol := colTID
 	timestampCol := colTimestamp
+	splitByTID := false
+	var tidOrder []string
 	if len(opts) > 0 {
 		if opts[0].DeviceIDCol > 0 {
 			deviceIDCol = opts[0].DeviceIDCol
@@ -379,8 +419,10 @@ func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, resta
 		if opts[0].TimestampCol > 0 {
 			timestampCol = opts[0].TimestampCol
 		}
+		splitByTID = opts[0].SplitByTID
+		tidOrder = opts[0].TIDOrder
 	}
-	id := csvTaskID(tarPath, csvPath, deviceIDCol)
+	id := csvTaskIDSplit(tarPath, csvPath, deviceIDCol, splitByTID)
 
 	m.mu.Lock()
 	if existing, ok := m.tasks[id]; ok && (existing.Status == CSVStatusRunning || existing.Status == CSVStatusPending) {
@@ -417,6 +459,7 @@ func (m *CSVFilterTaskManager) Submit(tarPath, csvPath, outputPath string, resta
 		ID: id, TarPath: tarPath, CSVPath: csvPath, OutputPath: outputPath,
 		Status: CSVStatusPending, StartedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
 		DeviceIDCol: deviceIDCol, TimestampCol: timestampCol,
+		SplitByTID: splitByTID, TIDOrder: tidOrder,
 		cancel:      cancelCh,
 		SubmitOrder: m.order,
 	}
@@ -851,15 +894,31 @@ func extractValuesPart(line string) (head, valuesPart string, ok bool) {
 	return head, valuesPart, true
 }
 
+// insertHead 返回一行 INSERT 的 "INSERT ... VALUES" 前缀(不含 VALUES 之后内容)
+func insertHead(line string) string {
+	if h, _, ok := extractValuesPart(line); ok {
+		return h
+	}
+	return line
+}
+
 // FilterLine 解析单行,返回新行/原始数/保留数/首ts/末ts
 // deviceIDCol / tsCol 为 INSERT VALUES 中设备ID列和时间戳列的索引(0-based)
-func FilterLine(line string, segments map[string][]CSVSegment, preSkipped map[string]bool, deviceIDCol, tsCol int) (newLine string, lineRaw, lineKept int, firstTS, lastTS int64) {
-	head, valuesPart, ok := extractValuesPart(line)
-	if !ok {
-		return line, 0, 0, 0, 0
+// keptTuple 单条保留的 tuple 及其归属的 device id
+type keptTuple struct {
+	devID string
+	raw   string
+	ts    int64
+}
+
+// filterLineTuples 解析一行 INSERT,返回按出现顺序保留的 tuples(含归属 devID)与原始条数
+// head 为 "INSERT ... VALUES" 前缀; 仅当该行无匹配时 ok=false
+func filterLineTuples(line string, segments map[string][]CSVSegment, preSkipped map[string]bool, deviceIDCol, tsCol int) (head string, kept []keptTuple, lineRaw int, firstTS, lastTS int64, ok bool) {
+	h, valuesPart, ok2 := extractValuesPart(line)
+	if !ok2 {
+		return "", nil, 0, 0, 0, false
 	}
 	tuples := splitTuples(valuesPart)
-	var kept []string
 	for _, t := range tuples {
 		fields := tupleFields(t)
 		lineRaw++
@@ -882,16 +941,59 @@ func FilterLine(line string, segments map[string][]CSVSegment, preSkipped map[st
 		if !exists || !segmentOverlaps(ts, segs) {
 			continue
 		}
-		kept = append(kept, t)
-		lineKept++
+		kept = append(kept, keptTuple{devID: devID, raw: t, ts: ts})
 		if firstTS == 0 {
 			firstTS = ts
 		}
 	}
-	if len(kept) == 0 {
-		return "", lineRaw, lineKept, firstTS, lastTS
+	return h, kept, lineRaw, firstTS, lastTS, true
+}
+
+// FilterLine 解析单行,返回新行/原始数/保留数/首ts/末ts
+// deviceIDCol / tsCol 为 INSERT VALUES 中设备ID列和时间戳列的索引(0-based)
+// 保留所有匹配 TID 的 tuple,按原文件中出现顺序拼接成单行(非 split 模式)
+func FilterLine(line string, segments map[string][]CSVSegment, preSkipped map[string]bool, deviceIDCol, tsCol int) (newLine string, lineRaw, lineKept int, firstTS, lastTS int64) {
+	head, kept, raw, fTS, lTS, ok := filterLineTuples(line, segments, preSkipped, deviceIDCol, tsCol)
+	if !ok {
+		return line, 0, 0, 0, 0
 	}
-	return head + " " + strings.Join(kept, ",") + ";", lineRaw, lineKept, firstTS, lastTS
+	lineRaw = raw
+	if len(kept) == 0 {
+		return "", lineRaw, 0, fTS, lTS
+	}
+	parts := make([]string, 0, len(kept))
+	for _, k := range kept {
+		parts = append(parts, k.raw)
+		lineKept++
+	}
+	return head + " " + strings.Join(parts, ",") + ";", lineRaw, lineKept, fTS, lTS
+}
+
+// FilterLineBuckets 解析单行,按 TID(device id) 分桶返回每行保留的 tuple。
+// 返回 map[tid][]string(每个 TID 的保留 tuple,按出现顺序),用于 split 模式下按 TID 输出独立 SQL。
+// 同时返回原始条数 raw 与首/末时间戳。
+func FilterLineBuckets(line string, segments map[string][]CSVSegment, preSkipped map[string]bool, deviceIDCol, tsCol int) (buckets map[string][]string, raw int, firstTS, lastTS int64, ok bool) {
+	_, kept, r, fTS, lTS, ok2 := filterLineTuples(line, segments, preSkipped, deviceIDCol, tsCol)
+	if !ok2 {
+		return nil, 0, 0, 0, false
+	}
+	if len(kept) == 0 {
+		return nil, r, fTS, lTS, true
+	}
+	buckets = make(map[string][]string)
+	for _, k := range kept {
+		buckets[k.devID] = append(buckets[k.devID], k.raw)
+	}
+	return buckets, r, fTS, lTS, true
+}
+
+// bucketKeptCount 统计分桶中保留的 tuple 总数
+func bucketKeptCount(buckets map[string][]string) int {
+	n := 0
+	for _, v := range buckets {
+		n += len(v)
+	}
+	return n
 }
 
 // ========== gzip 文件打开 ==========
@@ -947,11 +1049,168 @@ func gzipBaseName(path string) string {
 // ========== 任务执行 ==========
 
 // RunTask 运行单个过滤任务
+// ========== 输出 sink(单文件 或 按TID多文件) ==========
+
+// csvOutputSink 封装过滤结果输出:
+//   - 非 split: 写入单个 OutputPath 文件(保持原有逻辑)
+//   - split:    按 TID 写入多个独立文件, 文件名在 OutputPath 基础上插入干净化的 TID
+type csvOutputSink struct {
+	split   bool
+	base    string // 单文件路径(非split)或分桶路径模板(split)
+	dir     string
+	ext     string
+	singleF *os.File
+	singleW *bufio.Writer
+
+	tidF map[string]*os.File // key = 完整文件路径
+	tidW map[string]*bufio.Writer
+	// 已创建(实际写入过)的文件路径, 用于后续逐个导入
+	Created []string
+}
+
+// sanitizeTID 清理 TID 用于文件名(去除路径分隔与危险字符)
+func sanitizeTID(tid string) string {
+	r := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_", " ", "_")
+	s := r.Replace(strings.TrimSpace(tid))
+	if s == "" {
+		s = "unknown"
+	}
+	return s
+}
+
+// splitPathForTID 返回 split 模式下某 TID 的输出文件路径
+func (s *csvOutputSink) splitPathForTID(tid string) string {
+	return filepath.Join(s.dir, s.base+"_"+sanitizeTID(tid)+s.ext)
+}
+
+// newCSVOutputSink 创建输出 sink。
+// basePath: 单文件路径; split 模式下以其目录/基底派生各 TID 文件。
+func newCSVOutputSink(split bool, basePath string) *csvOutputSink {
+	if !split {
+		return &csvOutputSink{split: false, base: basePath}
+	}
+	dir := filepath.Dir(basePath)
+	ext := filepath.Ext(basePath) // .sql
+	stem := strings.TrimSuffix(basePath, ext)
+	return &csvOutputSink{
+		split: true, base: filepath.Base(stem), dir: dir, ext: ext,
+		tidF: make(map[string]*os.File),
+		tidW: make(map[string]*bufio.Writer),
+	}
+}
+
+// open 打开输出(非split: 创建/追加单文件; split: 惰性打开各TID文件, 这里仅预留)
+func (s *csvOutputSink) open(appendMode bool) error {
+	if s.split {
+		return nil
+	}
+	var err error
+	if appendMode {
+		s.singleF, err = os.OpenFile(s.base, os.O_WRONLY|os.O_APPEND, 0644)
+	} else {
+		s.singleF, err = os.Create(s.base)
+	}
+	if err != nil {
+		return err
+	}
+	s.singleW = bufio.NewWriterSize(s.singleF, 1<<20)
+	return nil
+}
+
+// writeLine 写入一行过滤结果。
+// line: 非split模式下已拼接好的完整 INSERT 行(可能为空=无匹配);
+// buckets: split 模式下 map[tid][]tuple(该行各TID保留的tuple);
+// head: INSERT 前缀(用于 split 模式重建每行)。
+func (s *csvOutputSink) writeLine(line, head string, buckets map[string][]string) error {
+	if !s.split {
+		if line == "" {
+			return nil
+		}
+		_, err := s.singleW.WriteString(line)
+		if err != nil {
+			return err
+		}
+		return s.singleW.WriteByte('\n')
+	}
+	// split 模式: 每个 TID 独立写一行完整 INSERT
+	for tid, tups := range buckets {
+		if len(tups) == 0 {
+			continue
+		}
+		p := s.splitPathForTID(tid)
+		w, ok := s.tidW[p]
+		if !ok {
+			f, err := os.Create(p)
+			if err != nil {
+				return err
+			}
+			s.tidF[p] = f
+			s.tidW[p] = bufio.NewWriterSize(f, 1<<20)
+			w = s.tidW[p]
+			s.Created = append(s.Created, p)
+		}
+		if _, err := w.WriteString(head + " " + strings.Join(tups, ",") + ";\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flush 冲刷所有 writer
+func (s *csvOutputSink) flush() error {
+	if !s.split {
+		if s.singleW != nil {
+			return s.singleW.Flush()
+		}
+		return nil
+	}
+	for _, w := range s.tidW {
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// close 关闭所有文件
+func (s *csvOutputSink) close() error {
+	if !s.split {
+		if s.singleF != nil {
+			return s.singleF.Close()
+		}
+		return nil
+	}
+	var firstErr error
+	for _, f := range s.tidF {
+		if err := f.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// removeCreated 删除所有已创建的输出文件(失败时清理用)
+func (s *csvOutputSink) removeCreated() {
+	for _, p := range s.Created {
+		_ = os.Remove(p)
+	}
+}
+
+// ========== 任务执行 ==========
+
 func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]CSVSegment, prog *CSVProgressFile) {
 	t.setStatus(CSVStatusRunning)
 	startTime := time.Now()
 	log.Printf("[CSV过滤] 开始 tar=%s csv=%s output=%s (device_id列=%d, 时间戳列=%d)",
 		t.TarPath, t.CSVPath, t.OutputPath, t.deviceIDColIdx(), t.timestampColIdx())
+
+	split := t.SplitByTID
+
+	// split 模式不支持断点续传(多文件进度复杂), 强制从头开始并清理历史分桶输出
+	if split {
+		prog = nil
+		clearSplitOutputs(t.OutputPath)
+	}
 
 	// 进度文件列配置不一致时(例如同一 tar+csv 换了过滤列)忽略旧进度,从头开始
 	if prog != nil {
@@ -981,7 +1240,13 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 	for _, s := range segments {
 		totalSegs += len(s)
 	}
-	log.Printf("[CSV过滤] %d 个 TID, %d 个时间段", len(segments), totalSegs)
+	log.Printf("[CSV过滤] %d 个 TID, %d 个时间段%s", len(segments), totalSegs,
+		func() string {
+			if split {
+				return " (按TID拆分输出)"
+			}
+			return ""
+		}())
 
 	tarStat, err := os.Stat(t.TarPath)
 	if err != nil {
@@ -1012,17 +1277,13 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 
 	br := bufio.NewReaderSize(tr, 1<<20)
 
-	var outFile *os.File
-	if prog != nil {
-		outFile, err = os.OpenFile(t.OutputPath, os.O_WRONLY|os.O_APPEND, 0644)
-	} else {
-		outFile, err = os.Create(t.OutputPath)
-	}
-	if err != nil {
+	// 输出 sink(单文件 或 按TID多文件)
+	sink := newCSVOutputSink(split, t.OutputPath)
+	if err := sink.open(prog != nil); err != nil {
 		t.setError("打开输出文件失败: " + err.Error())
 		return
 	}
-	bw := bufio.NewWriterSize(outFile, 1<<20)
+	defer sink.close()
 
 	progressSaveEvery := int64(500)
 	lastSavedAt := int64(0)
@@ -1037,9 +1298,12 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 	}
 
 	type lineResult struct {
-		newLine string
+		line    string // 非split模式拼接好的行(可能为空)
+		head    string // split 模式需要的前缀
+		buckets map[string][]string
 		raw     int
 		kept    int
+		firstTS int64
 		lastTS  int64
 	}
 
@@ -1099,21 +1363,31 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 			if !isInsert(trimmed) {
 				continue
 			}
-			newLine, lr, lk, fTS, lTS := FilterLine(trimmed, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
-			if fTS != 0 {
-				firstTS = fTS
+			var res lineResult
+			if split {
+				buckets, raw, fTS, lTS, okB := FilterLineBuckets(trimmed, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
+				if okB {
+					res = lineResult{head: insertHead(trimmed), buckets: buckets, raw: raw, kept: bucketKeptCount(buckets), firstTS: fTS, lastTS: lTS}
+				} else {
+					res = lineResult{raw: 0}
+				}
+			} else {
+				nl, raw, kept, fTS, lTS := FilterLine(trimmed, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
+				res = lineResult{line: nl, raw: raw, kept: kept, firstTS: fTS, lastTS: lTS}
 			}
-			rawLines += int64(lr)
-			keptLines += int64(lk)
-			if lTS != 0 {
-				lastTS = lTS
+			if res.firstTS != 0 {
+				firstTS = res.firstTS
+			}
+			rawLines += int64(res.raw)
+			keptLines += int64(res.kept)
+			if res.lastTS != 0 {
+				lastTS = res.lastTS
 			}
 			writtenLines++
-			if newLine != "" {
-				bw.WriteString(newLine)
-				bw.WriteByte('\n')
+			if err := sink.writeLine(res.line, res.head, res.buckets); err != nil {
+				log.Printf("[CSV过滤] 写首行失败: %v", err)
 			}
-			if err := bw.Flush(); err != nil {
+			if err := sink.flush(); err != nil {
 				log.Printf("[CSV过滤] flush 首行失败: %v", err)
 			}
 			phase1Done = true
@@ -1130,23 +1404,25 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 	fatalErr := ""
 
 	saveProgressAndLog := func() {
-		if err := bw.Flush(); err != nil {
+		if err := sink.flush(); err != nil {
 			log.Printf("[CSV过滤] flush 失败: %v", err)
 		}
-		curProg.LinesDone = totalLines
-		curProg.RawLines = rawLines
-		curProg.KeptLines = keptLines
-		curProg.FirstTS = firstTS
-		curProg.LastTS = lastTS
-		if err := saveCSVProgress(curProg); err != nil {
-			progressSaveFails++
-			log.Printf("[CSV过滤] 保存进度失败(连续%d次): %v", progressSaveFails, err)
-			if progressSaveFails >= 3 {
-				fatalErr = "进度持久化连续失败3次: " + err.Error()
+		if !split {
+			curProg.LinesDone = totalLines
+			curProg.RawLines = rawLines
+			curProg.KeptLines = keptLines
+			curProg.FirstTS = firstTS
+			curProg.LastTS = lastTS
+			if err := saveCSVProgress(curProg); err != nil {
+				progressSaveFails++
+				log.Printf("[CSV过滤] 保存进度失败(连续%d次): %v", progressSaveFails, err)
+				if progressSaveFails >= 3 {
+					fatalErr = "进度持久化连续失败3次: " + err.Error()
+				}
+				return
 			}
-			return
+			progressSaveFails = 0
 		}
-		progressSaveFails = 0
 		lastSavedAt = writtenLines
 
 		pct := 0
@@ -1201,8 +1477,17 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 			go func(idx int, l string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				nl, raw, kept, _, lTS := FilterLine(l, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
-				results[idx] = lineResult{newLine: nl, raw: raw, kept: kept, lastTS: lTS}
+				if split {
+					buckets, raw, fTS, lTS, okB := FilterLineBuckets(l, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
+					if okB {
+						results[idx] = lineResult{head: insertHead(l), buckets: buckets, raw: raw, kept: bucketKeptCount(buckets), firstTS: fTS, lastTS: lTS}
+					} else {
+						results[idx] = lineResult{raw: 0}
+					}
+				} else {
+					nl, raw, kept, fTS, lTS := FilterLine(l, segments, nil, t.deviceIDColIdx(), t.timestampColIdx())
+					results[idx] = lineResult{line: nl, raw: raw, kept: kept, firstTS: fTS, lastTS: lTS}
+				}
 			}(i, line)
 		}
 		wg.Wait()
@@ -1211,17 +1496,17 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 			return nil
 		}
 		for _, pr := range results {
+			if pr.firstTS != 0 {
+				firstTS = pr.firstTS
+			}
 			rawLines += int64(pr.raw)
 			keptLines += int64(pr.kept)
 			if pr.lastTS != 0 {
 				lastTS = pr.lastTS
 			}
-			if pr.newLine != "" {
-				if _, err := bw.WriteString(pr.newLine); err != nil {
-					bw.Flush()
-					return err
-				}
-				bw.WriteByte('\n')
+			if err := sink.writeLine(pr.line, pr.head, pr.buckets); err != nil {
+				sink.flush()
+				return err
 			}
 			writtenLines++
 		}
@@ -1254,8 +1539,9 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 
 		if len(batch) >= batchSize {
 			if err := flushBatch(); err != nil {
-				bw.Flush()
-				outFile.Close()
+				sink.flush()
+				sink.close()
+				sink.removeCreated()
 				t.setError("写入输出失败: " + err.Error())
 				return
 			}
@@ -1267,22 +1553,26 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 
 	if !cancelled && fatalErr == "" && len(batch) > 0 {
 		if err := flushBatch(); err != nil {
-			bw.Flush()
-			outFile.Close()
+			sink.flush()
+			sink.close()
+			sink.removeCreated()
 			t.setError("写入输出失败: " + err.Error())
 			return
 		}
 	}
 
 	if cancelled || fatalErr != "" {
-		bw.Flush()
-		outFile.Close()
-		curProg.LinesDone = totalLines
-		curProg.RawLines = rawLines
-		curProg.KeptLines = keptLines
-		curProg.FirstTS = firstTS
-		curProg.LastTS = lastTS
-		_ = saveCSVProgress(curProg)
+		sink.flush()
+		sink.close()
+		sink.removeCreated()
+		if !split {
+			curProg.LinesDone = totalLines
+			curProg.RawLines = rawLines
+			curProg.KeptLines = keptLines
+			curProg.FirstTS = firstTS
+			curProg.LastTS = lastTS
+			_ = saveCSVProgress(curProg)
+		}
 		t.mu.Lock()
 		errMsg := "已取消"
 		if fatalErr != "" {
@@ -1296,13 +1586,16 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 		return
 	}
 
-	if err := bw.Flush(); err != nil {
-		outFile.Close()
+	if err := sink.flush(); err != nil {
+		sink.close()
+		sink.removeCreated()
 		t.setError("flush 失败: " + err.Error())
 		return
 	}
-	outFile.Close()
-	clearCSVProgress(t.OutputPath)
+	sink.close()
+	if !split {
+		clearCSVProgress(t.OutputPath)
+	}
 
 	t.mu.Lock()
 	t.Status = CSVStatusDone
@@ -1313,9 +1606,15 @@ func (m *CSVFilterTaskManager) RunTask(t *CSVFilterTask, segments map[string][]C
 	t.LastTS = lastTS
 	t.Pct = 100
 	t.FinishedAt = time.Now().Unix()
+	if split {
+		// 记录各 TID 输出文件(供管道逐个导入)
+		t.OutputFiles = append([]string(nil), sink.Created...)
+	} else {
+		t.OutputFiles = []string{t.OutputPath}
+	}
 	t.mu.Unlock()
-	log.Printf("[CSV过滤] 完成: %d 行, 原始 %d 条, 保留 %d 条, 耗时 %s",
-		totalLines, rawLines, keptLines, time.Since(startTime).Round(time.Millisecond))
+	log.Printf("[CSV过滤] 完成: %d 行, 原始 %d 条, 保留 %d 条, 耗时 %s, 输出文件=%d",
+		totalLines, rawLines, keptLines, time.Since(startTime).Round(time.Millisecond), len(t.OutputFiles))
 }
 
 // ResumeOnStartup 启动时自动恢复未完成任务

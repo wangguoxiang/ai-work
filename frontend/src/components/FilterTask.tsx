@@ -417,6 +417,24 @@ const FilterTask: React.FC = () => {
                               </Text>
                             </div>
                           )}
+                          {/* 按TID拆分输出信息 */}
+                          {task.split_by_tid && (
+                            <div style={{ marginBottom: 6 }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                <Tag color="geekblue" style={{ fontSize: 10 }}>按TID拆分输出</Tag>
+                                共 {task.tids?.length || 0} 个TID · {task.filter_outputs?.length || 0} 个SQL文件
+                              </Text>
+                              {task.filter_outputs && task.filter_outputs.length > 0 && (
+                                <div style={{ marginTop: 4, maxHeight: 90, overflow: 'auto' }}>
+                                  {task.filter_outputs.map((f, fi) => (
+                                    <div key={fi} style={{ fontSize: 10, fontFamily: 'monospace', color: '#555', lineHeight: 1.6 }}>
+                                      📄 {f}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                           {/* 导入信息 */}
                           {task.import_status && task.import_status !== '' && (
                             <div>

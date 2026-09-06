@@ -396,6 +396,10 @@ export interface PipelineTask {
   filter_lines_kept: number;
   filter_lines_raw: number;
 
+  // 按TID拆分输出(GPS多TID管道)
+  split_by_tid?: boolean;
+  filter_outputs?: string[];   // 过滤产生的SQL文件(单文件或按TID多个)
+
   // 导入阶段
   import_status: string;
   import_progress: number;

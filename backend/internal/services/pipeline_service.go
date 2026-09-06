@@ -62,6 +62,11 @@ type PipelineTask struct {
 	PlateNos []string `json:"plate_nos"`
 	CSVPath  string   `json:"csv_path"`
 
+	// 按TID拆分输出(GPS 模式多 TID 管道为 true)
+	SplitByTID bool `json:"split_by_tid,omitempty"`
+	// 过滤阶段实际产生的 SQL 输出文件(跨所有 COS 文件累计; split 模式为各 TID 独立文件)
+	FilterOutputs []string `json:"filter_outputs,omitempty"`
+
 	// 过滤列配置(0 表示默认: device_id=2, timestamp=18; 控车为 1/3)
 	DeviceIDCol  int `json:"device_id_col,omitempty"`
 	TimestampCol int `json:"timestamp_col,omitempty"`
@@ -135,6 +140,7 @@ func (t *PipelineTask) getSnapshot() PipelineTask {
 		ID: t.ID, Status: t.Status, Progress: t.Progress, Error: t.Error,
 		StartAt: t.StartAt, UpdatedAt: t.UpdatedAt, Elapsed: t.Elapsed,
 		COSKeys: t.COSKeys, TIDs: t.TIDs, VINs: t.VINs, PlateNos: t.PlateNos, CSVPath: t.CSVPath,
+		SplitByTID: t.SplitByTID, FilterOutputs: t.FilterOutputs,
 		DeviceIDCol: t.DeviceIDCol, TimestampCol: t.TimestampCol,
 		Downloads: t.Downloads, DownloadProgress: t.DownloadProgress,
 		FilterStatus: t.FilterStatus, FilterProgress: t.FilterProgress,
@@ -666,6 +672,7 @@ func (pm *PipelineTaskManager) runDownloadStage(ctx context.Context, task *Pipel
 }
 
 // runFilterAndImportStage 执行过滤+导入阶段
+// GPS 模式(DeviceIDCol<=0)且 CSV 含多个 TID 时启用按TID拆分: 每个TID独立SQL文件并分别导入。
 func (pm *PipelineTaskManager) runFilterAndImportStage(
 	ctx context.Context,
 	task *PipelineTask,
@@ -694,7 +701,14 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 			return "TID"
 		}())
 
-	// 过滤任务组的取消信号: 用户点击"停止"时关闭, 使正在运行的过滤任务快速退出
+	// GPS 模式多 TID 时按 TID 拆分输出: 每个 TID 独立 SQL 文件 + 分别导入(便于按 TID 查询/导出)
+	splitByTID := task.DeviceIDCol <= 0 && len(segments) > 1
+	if splitByTID {
+		log.Printf("[管道 %s] 检测到 %d 个 TID, 启用按TID拆分输出", task.ID, len(segments))
+	}
+	task.lock()
+	task.SplitByTID = splitByTID
+	task.unlock() // 过滤任务组的取消信号: 用户点击"停止"时关闭, 使正在运行的过滤任务快速退出
 	groupCancel := make(chan struct{})
 	stopCh := task.stopCh()
 	go func() {
@@ -709,7 +723,11 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 	}()
 
 	// 为每个 tar 文件创建过滤任务并串行执行
-	submitOpts := SubmitOpts{DeviceIDCol: task.DeviceIDCol, TimestampCol: task.TimestampCol}
+	submitOpts := SubmitOpts{
+		DeviceIDCol:  task.DeviceIDCol,
+		TimestampCol: task.TimestampCol,
+		SplitByTID:   splitByTID,
+	}
 	for _, tarPath := range tarPaths {
 		// 每个文件开始处理前重置为过滤阶段（确保多文件时进度不会卡在100%）
 		task.setStage(StageFilter)
@@ -731,11 +749,13 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 		task.FilterTaskID = ft.ID
 		task.unlock()
 
-		// 按 Submit 决定的 outputPath 精确查找进度文件(用于续传)
+		// 按 Submit 决定的 outputPath 精确查找进度文件(用于续传; split 模式自动从头开始)
 		var prog *CSVProgressFile
-		if p, ok := LoadCSVProgressAt(tarPath, task.CSVPath, ft.OutputPath); ok {
-			prog = p
-			log.Printf("[管道 %s] 续传过滤: %s (已处理 %d 行)", task.ID, tarPath, prog.LinesDone)
+		if !splitByTID {
+			if p, ok := LoadCSVProgressAt(tarPath, task.CSVPath, ft.OutputPath); ok {
+				prog = p
+				log.Printf("[管道 %s] 续传过滤: %s (已处理 %d 行)", task.ID, tarPath, prog.LinesDone)
+			}
 		}
 
 		// 执行过滤（同步阻塞）
@@ -765,16 +785,35 @@ func (pm *PipelineTaskManager) runFilterAndImportStage(
 			return
 		}
 
+		// 记录本次过滤产生的输出文件(单文件或按TID拆分后的多个文件)
+		if len(snap.OutputFiles) > 0 {
+			task.lock()
+			task.FilterOutputs = append(task.FilterOutputs, snap.OutputFiles...)
+			task.unlock()
+			if store := GetTaskStore(); store != nil {
+				store.MarkDirty()
+			}
+		}
+
 		// 过滤成功，将过滤后的 SQL 文件导入临时 MySQL 数据库
 		task.setStage(StageImport)
-		log.Printf("[管道 %s] 过滤完成，开始导入MySQL: task=%s, output=%s", task.ID, ft.ID, ft.OutputPath)
+		if splitByTID {
+			log.Printf("[管道 %s] 过滤完成(%d 个TID文件), 开始逐个导入MySQL: task=%s", task.ID, len(snap.OutputFiles), ft.ID)
+		} else {
+			log.Printf("[管道 %s] 过滤完成，开始导入MySQL: task=%s, output=%s", task.ID, ft.ID, ft.OutputPath)
+		}
 
 		// 导入前再次检查是否已停止(避免启动多余的导入)
 		if task.stopRequested() {
 			task.setError("任务已停止")
 			return
 		}
-		ImportSQLToTempDBWithTaskCtx(ft, ft.OutputPath, ctx)
+		if splitByTID {
+			// 按TID拆分: 每个TID文件分别导入, 聚合进度
+			ImportSQLFilesToTempDBWithTaskCtx(ft, ft.OutputFiles, ctx)
+		} else {
+			ImportSQLToTempDBWithTaskCtx(ft, ft.OutputPath, ctx)
+		}
 
 		// 最终状态检查并更新进度
 		task.lock()
